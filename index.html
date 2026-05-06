@@ -143,7 +143,7 @@
       </div>
       <p style="font-size:11px;color:#888;margin-bottom:10px;">設定儲存於瀏覽器 localStorage，匯出 CSV 可跨裝置共用。</p>
       <table>
-        <thead><tr><th style="width:7em">段代碼</th><th style="width:7em">座標系統</th><th>備註</th><th style="width:3em"></th></tr></thead>
+        <thead><tr><th style="width:6em">段代碼</th><th style="width:7em">類型</th><th style="width:7em">座標系統</th><th>備註</th><th style="width:3em"></th></tr></thead>
         <tbody id="config-tbody"></tbody>
       </table>
     </div>
@@ -219,7 +219,7 @@ const DEFAULT_CS = {
   '0013':'twd67','0014':'twd67','0015':'twd67','0016':'twd67',
   '0017':'twd67','0018':'twd97','0019':'twd67','0020':'twd67',
   '0021':'twd97','0022':'twd97','0023':'twd67','0024':'twd67',
-  '0025':'twd97','0026':'twd67','0027':'twd67','0028':'twd67',
+  '0025':{top:'twd97',sub:'twd67'},'0026':'twd67','0027':'twd67','0028':'twd67',
   '0029':'twd67','0030':'twd67',
   '0037':'twd67','0038':'twd67','0039':'twd67','0040':'twd67','0041':'twd67',
   '0049':'twd67','0050':'twd67','0051':'twd67','0052':'twd67',
@@ -236,6 +236,16 @@ const DEFAULT_CS = {
 
 // Working config (merged from localStorage)
 let CS = {};
+
+// ── CRS lookup (supports mixed top/sub per segment) ─────────────────────────
+function getCRS(segCode, dirName) {
+  const entry = CS[segCode];
+  if (!entry) return 'twd67';
+  if (typeof entry === 'string') return entry;
+  // mixed: {top, sub}
+  const isTop = dirName === 'KA' + segCode;
+  return (isTop ? entry.top : entry.sub) || 'twd67';
+}
 
 // ── Coordinate conversion ───────────────────────────────────────────────────
 function convert(n, e, crsType) {
@@ -413,7 +423,7 @@ async function runProcess() {
     const segCode = await findSegCode(dir);
     if (!segCode) continue;
 
-    const crsType  = CS[segCode] || 'twd67';
+    const crsType  = getCRS(segCode, dir.name);
     const segLabel = 'KA' + segCode;
     const sheetId  = dir.name.startsWith('KA' + segCode)
       ? (dir.name.slice(6) || 'TOP') : dir.name;
@@ -549,12 +559,24 @@ function loadConfig() {
 }
 
 function saveConfig() {
-  const newCS = {};
+  // 合併同段代碼不同類型的列 → string 或 {top, sub}
+  const raw = {};
   for (const tr of document.querySelectorAll('#config-tbody tr')) {
     const inputs = tr.querySelectorAll('input, select');
     const code = inputs[0]?.value.trim().padStart(4, '0');
-    const crs  = inputs[1]?.value;
-    if (code && (crs === 'twd67' || crs === 'twd97')) newCS[code] = crs;
+    const type = inputs[1]?.value;   // '*' | 'top' | 'sub'
+    const crs  = inputs[2]?.value;
+    if (!code || !['twd67','twd97'].includes(crs)) continue;
+    if (!raw[code]) raw[code] = {};
+    raw[code][type] = crs;
+  }
+  const newCS = {};
+  for (const [code, types] of Object.entries(raw)) {
+    if (types['*']) {
+      newCS[code] = types['*'];          // 單一 CRS
+    } else {
+      newCS[code] = { top: types['top'] || 'twd67', sub: types['sub'] || 'twd67' };
+    }
   }
   CS = newCS;
   localStorage.setItem('ka_coord_system', JSON.stringify(newCS));
@@ -563,7 +585,7 @@ function saveConfig() {
 
 function resetConfig() {
   if (!confirm('將還原為內建預設值，並清除已儲存的設定，確定嗎？')) return;
-  CS = { ...DEFAULT_CS };
+  CS = JSON.parse(JSON.stringify(DEFAULT_CS));
   localStorage.removeItem('ka_coord_system');
   renderConfigTable();
 }
@@ -571,20 +593,29 @@ function resetConfig() {
 function renderConfigTable() {
   const tbody = document.getElementById('config-tbody');
   tbody.innerHTML = '';
-  for (const [code, crs] of Object.entries(CS).sort(([a],[b]) => a.localeCompare(b))) {
-    tbody.appendChild(makeConfigRow(code, crs));
+  for (const [code, entry] of Object.entries(CS).sort(([a],[b]) => a.localeCompare(b))) {
+    if (typeof entry === 'string') {
+      tbody.appendChild(makeConfigRow(code, '*', entry));
+    } else {
+      tbody.appendChild(makeConfigRow(code, 'top', entry.top || 'twd97'));
+      tbody.appendChild(makeConfigRow(code, 'sub', entry.sub || 'twd67'));
+    }
   }
 }
 
-function makeConfigRow(code = '', crs = 'twd67') {
+function makeConfigRow(code = '', type = '*', crs = 'twd67') {
+  const typeOpts = ['*','top','sub'].map(v =>
+    `<option value="${v}" ${type===v?'selected':''}>${{' *':'全部','top':'頂層','sub':'分幅'}[' '+v]||v}</option>`
+  ).join('');
+  const crsOpts = ['twd67','twd97'].map(v =>
+    `<option value="${v}" ${crs===v?'selected':''}>${v}</option>`
+  ).join('');
   const tr = document.createElement('tr');
   tr.innerHTML = `
-    <td><input type="text" value="${code}" maxlength="4" style="width:5em;font-family:monospace"></td>
-    <td><select>
-      <option value="twd67" ${crs === 'twd67' ? 'selected' : ''}>twd67</option>
-      <option value="twd97" ${crs === 'twd97' ? 'selected' : ''}>twd97</option>
-    </select></td>
-    <td><input type="text" placeholder="（備註）"></td>
+    <td><input type="text" value="${code}" maxlength="4" style="width:4.5em;font-family:monospace"></td>
+    <td><select>${typeOpts}</select></td>
+    <td><select>${crsOpts}</select></td>
+    <td><input type="text" placeholder="備註"></td>
     <td><button onclick="this.closest('tr').remove()" style="padding:2px 8px">✕</button></td>`;
   return tr;
 }
@@ -594,10 +625,11 @@ function addConfigRow() {
 }
 
 function exportCSV() {
-  const rows = ['seg_code,crs'];
+  const rows = ['seg_code,type,crs'];
   for (const tr of document.querySelectorAll('#config-tbody tr')) {
     const ins = tr.querySelectorAll('input, select');
-    if (ins[0] && ins[1]) rows.push(`${ins[0].value.trim()},${ins[1].value}`);
+    if (ins[0] && ins[1] && ins[2])
+      rows.push(`${ins[0].value.trim()},${ins[1].value},${ins[2].value}`);
   }
   triggerDownload(new Blob([rows.join('\n')], { type: 'text/csv' }), 'coord_system.csv');
 }
@@ -611,8 +643,14 @@ function importCSV() {
     tbody.innerHTML = '';
     for (const line of text.split(/\r?\n/)) {
       if (!line.trim() || line.startsWith('seg_code')) continue;
-      const [code, crs] = line.split(',').map(s => s.trim());
-      if (code && crs) tbody.appendChild(makeConfigRow(code, crs));
+      const parts = line.split(',').map(s => s.trim());
+      // 支援舊格式 (seg_code,crs) 與新格式 (seg_code,type,crs)
+      const [code, second, third] = parts;
+      if (third) {
+        tbody.appendChild(makeConfigRow(code, second, third));
+      } else if (code && second) {
+        tbody.appendChild(makeConfigRow(code, '*', second));
+      }
     }
   };
   inp.click();
