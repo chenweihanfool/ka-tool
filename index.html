@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>地籍圖整合工具</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.9.0/proj4.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: #f0f2f5; color: #222; font-size: 14px; }
+  #app { max-width: 860px; margin: 0 auto; padding: 20px; }
+
+  header { margin-bottom: 20px; }
+  header h1 { font-size: 22px; font-weight: 700; color: #1a3a5c; }
+  header p  { color: #666; margin-top: 4px; font-size: 12px; }
+
+  .tabs { display: flex; gap: 4px; border-bottom: 2px solid #d0d7e2; margin-bottom: 18px; }
+  .tab-btn { padding: 8px 18px; border: none; background: none; cursor: pointer;
+             font-size: 13px; color: #555; border-radius: 4px 4px 0 0; transition: background .15s; }
+  .tab-btn:hover   { background: #e8edf4; }
+  .tab-btn.active  { background: #fff; color: #1a3a5c; font-weight: 600;
+                     border: 2px solid #d0d7e2; border-bottom: 2px solid #fff; margin-bottom: -2px; }
+
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
+
+  .card { background: #fff; border: 1px solid #d8dde8; border-radius: 8px;
+          padding: 18px 20px; margin-bottom: 14px; }
+  .card h2 { font-size: 14px; font-weight: 600; color: #1a3a5c; margin-bottom: 12px; }
+
+  button { padding: 7px 16px; border: 1px solid #b0baca; border-radius: 5px;
+           background: #f5f7fa; cursor: pointer; font-size: 13px; transition: background .15s; }
+  button:hover:not(:disabled) { background: #e4eaf4; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary   { background: #1a5cb8; color: #fff; border-color: #1450a0; }
+  button.primary:hover:not(:disabled) { background: #144fa3; }
+
+  .step-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  #lblDir { color: #2a7a3a; font-size: 13px; font-weight: 500; }
+
+  .check-group { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 4px; }
+  .check-group label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .check-group input[type=checkbox] { width: 15px; height: 15px; cursor: pointer; }
+
+  .progress-bar { height: 10px; background: #e0e4eb; border-radius: 5px; overflow: hidden; margin-bottom: 8px; }
+  #progress-fill { height: 100%; background: #1a5cb8; width: 0; transition: width .2s; border-radius: 5px; }
+  #progress-text { font-size: 12px; color: #555; margin-bottom: 8px; }
+  #log { font-family: monospace; font-size: 11px; color: #444; background: #f5f7fa;
+         border: 1px solid #d8dde8; border-radius: 4px; padding: 8px; max-height: 140px;
+         overflow-y: auto; white-space: pre; }
+
+  .result-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .stat-box { background: #f5f7fa; border: 1px solid #d8dde8; border-radius: 6px;
+              padding: 10px 14px; text-align: center; }
+  .stat-box .val { font-size: 22px; font-weight: 700; color: #1a3a5c; }
+  .stat-box .lbl { font-size: 11px; color: #888; margin-top: 2px; }
+
+  .dl-group { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* config table */
+  .toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 6px 10px; border: 1px solid #d8dde8; text-align: left; }
+  th { background: #eef1f7; font-weight: 600; }
+  tr:hover td { background: #f7f9fc; }
+  td input, td select { width: 100%; border: none; background: transparent; font-size: 13px; padding: 0; }
+  td input:focus, td select:focus { outline: 1px solid #1a5cb8; border-radius: 2px; }
+
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px;
+           font-weight: 600; background: #e4ecfa; color: #1a5cb8; }
+  .badge.warn { background: #fff0d9; color: #a05c00; }
+
+  /* about */
+  .about-section { line-height: 1.7; }
+  .about-section h3 { font-size: 13px; font-weight: 600; color: #1a3a5c; margin: 14px 0 4px; }
+  .about-section ul { padding-left: 18px; }
+  .about-section code { background: #eef1f7; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <h1>地籍圖整合工具</h1>
+    <p>大湖地政事務所 · COA / BNP / PAR / CTL → GeoJSON (EPSG:3826 TWD97)</p>
+  </header>
+
+  <!-- ── Tabs ── -->
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab(this,'process')">主處理</button>
+    <button class="tab-btn" onclick="switchTab(this,'config')">段代碼設定</button>
+    <button class="tab-btn" onclick="switchTab(this,'about')">說明</button>
+  </div>
+
+  <!-- ══ Tab: 主處理 ══ -->
+  <div id="tab-process" class="tab-pane active">
+
+    <div class="card">
+      <h2>步驟 1 — 選擇資料夾</h2>
+      <div class="step-row">
+        <button onclick="pickDir()">📁 選擇資料夾…</button>
+        <span id="lblDir">尚未選擇</span>
+      </div>
+      <p style="font-size:11px;color:#888;margin-top:8px;">請選擇包含各段子資料夾的頂層目錄（例如「115年5月」）</p>
+    </div>
+
+    <div class="card">
+      <h2>步驟 2 — 輸出項目</h2>
+      <div class="check-group">
+        <label><input type="checkbox" id="chk-pts" checked> 界址點.geojson</label>
+        <label><input type="checkbox" id="chk-par" checked> 宗地.geojson</label>
+        <label><input type="checkbox" id="chk-ctl" checked> 圖根點.geojson</label>
+      </div>
+    </div>
+
+    <div class="card">
+      <button id="btnRun" class="primary" onclick="runProcess()" disabled>▶ 開始處理</button>
+    </div>
+
+    <div class="card" id="progress-section" hidden>
+      <div class="progress-bar"><div id="progress-fill"></div></div>
+      <div id="progress-text">準備中…</div>
+      <div id="log"></div>
+    </div>
+
+    <div class="card" id="result-section" hidden>
+      <h2>處理結果</h2>
+      <div class="result-grid" id="result-stats"></div>
+      <div class="dl-group" id="dl-btns"></div>
+    </div>
+
+  </div><!-- /tab-process -->
+
+  <!-- ══ Tab: 段代碼設定 ══ -->
+  <div id="tab-config" class="tab-pane">
+    <div class="card">
+      <div class="toolbar">
+        <button onclick="importCSV()">📂 匯入 CSV</button>
+        <button onclick="exportCSV()">💾 匯出 CSV</button>
+        <button onclick="addConfigRow()">＋ 新增列</button>
+        <button onclick="resetConfig()">↩ 還原預設</button>
+        <button class="primary" onclick="saveConfig()">✔ 儲存</button>
+      </div>
+      <p style="font-size:11px;color:#888;margin-bottom:10px;">設定儲存於瀏覽器 localStorage，匯出 CSV 可跨裝置共用。</p>
+      <table>
+        <thead><tr><th style="width:7em">段代碼</th><th style="width:7em">座標系統</th><th>備註</th><th style="width:3em"></th></tr></thead>
+        <tbody id="config-tbody"></tbody>
+      </table>
+    </div>
+  </div><!-- /tab-config -->
+
+  <!-- ══ Tab: 說明 ══ -->
+  <div id="tab-about" class="tab-pane">
+    <div class="card about-section">
+      <h3>支援的檔案格式</h3>
+      <ul>
+        <li><code>.COA</code> — 界址點座標（點號 + N + E）</li>
+        <li><code>.BNP</code> — 宗地邊界點序列</li>
+        <li><code>.PAR</code> — 宗地面積</li>
+        <li><code>.CTL</code> — 圖根點（格式：<code>點名  NNNNNNN.NNNEEEEEE.EEE</code>）</li>
+      </ul>
+      <h3>座標系統</h3>
+      <ul>
+        <li>地籍坐標（TWD67）→ EPSG:3828 → 轉換至 EPSG:3826</li>
+        <li>TWD97 → EPSG:3826（不做轉換）</li>
+        <li>各段代碼對應的座標系統可在「段代碼設定」頁自訂</li>
+      </ul>
+      <h3>輸出格式</h3>
+      <ul>
+        <li>GeoJSON with CRS tag <code>urn:ogc:def:crs:EPSG::3826</code></li>
+        <li>QGIS 可直接開啟，匯入時選擇 EPSG:3826</li>
+      </ul>
+      <h3>瀏覽器需求</h3>
+      <ul>
+        <li>需要 <strong>Chrome 或 Edge</strong>（File System Access API）</li>
+        <li>需要網路連線（proj4.js CDN）</li>
+      </ul>
+      <h3>版本</h3>
+      <p>v1.0.0 · 2026-05-06 · <a href="https://github.com/" target="_blank">GitHub</a></p>
+    </div>
+  </div><!-- /tab-about -->
+
+</div><!-- /app -->
+
+<script>
+'use strict';
+
+// ── Projection setup ────────────────────────────────────────────────────────
+proj4.defs('EPSG:3828',
+  '+proj=tmerc +lat_0=0 +lon_0=121 +k=0.9999 +x_0=250000 +y_0=0' +
+  ' +ellps=GRS67 +towgs84=-750.739,-359.515,-180.510,0,0,0,0 +units=m +no_defs');
+proj4.defs('EPSG:3826',
+  '+proj=tmerc +lat_0=0 +lon_0=121 +k=0.9999 +x_0=250000 +y_0=0' +
+  ' +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs');
+
+// ── Default segment→CRS mapping ─────────────────────────────────────────────
+const DEFAULT_CS = {
+  // 大湖鄉(15)
+  '0001':'twd67','0002':'twd67','0003':'twd67',
+  '0031':'twd67','0032':'twd67','0033':'twd67',
+  '0034':'twd67','0035':'twd67','0036':'twd67',
+  '0091':'twd97','0092':'twd97','0093':'twd97',
+  '0096':'twd97','0097':'twd97','0098':'twd97',
+  '0900':'twd97','0901':'twd97',
+  '0905':'twd97','0906':'twd97','0907':'twd97',
+  '0908':'twd97','0909':'twd97','0910':'twd97',
+  '0911':'twd97','0912':'twd97','0913':'twd97','0914':'twd97',
+  // 卓蘭鎮(16)
+  '0004':'twd67','0005':'twd97','0007':'twd67','0008':'twd67',
+  '0042':'twd67','0043':'twd67','0044':'twd67','0045':'twd67',
+  '0046':'twd67','0047':'twd67','0048':'twd67',
+  '0077':'twd97','0083':'twd67','0084':'twd67','0085':'twd67',
+  '0086':'twd67','0087':'twd67','0088':'twd67','0089':'twd67',
+  '0078':'twd97','0079':'twd97','0080':'twd97',
+  '0081':'twd97','0082':'twd97',
+  '0090':'twd97','0094':'twd97','0095':'twd97',
+  // 獅潭鄉(17)
+  '0009':'twd67','0010':'twd67','0011':'twd67','0012':'twd67',
+  '0013':'twd67','0014':'twd67','0015':'twd67','0016':'twd67',
+  '0017':'twd67','0018':'twd97','0019':'twd67','0020':'twd67',
+  '0021':'twd97','0022':'twd97','0023':'twd67','0024':'twd67',
+  '0025':'twd97','0026':'twd67','0027':'twd67','0028':'twd67',
+  '0029':'twd67','0030':'twd67',
+  '0037':'twd67','0038':'twd67','0039':'twd67','0040':'twd67','0041':'twd67',
+  '0049':'twd67','0050':'twd67','0051':'twd67','0052':'twd67',
+  '0053':'twd67','0054':'twd67','0055':'twd67',
+  '0902':'twd97','0903':'twd97','0904':'twd97',
+  // 泰安鄉(18)
+  '0056':'twd67','0057':'twd67','0058':'twd67','0059':'twd67',
+  '0060':'twd67','0061':'twd67','0062':'twd67','0063':'twd67',
+  '0064':'twd67','0065':'twd67','0066':'twd67','0067':'twd67',
+  '0068':'twd67','0069':'twd67','0070':'twd67','0071':'twd67',
+  '0072':'twd67','0073':'twd67','0074':'twd67','0075':'twd67',
+  '0076':'twd67','0099':'twd97',
+};
+
+// Working config (merged from localStorage)
+let CS = {};
+
+// ── Coordinate conversion ───────────────────────────────────────────────────
+function convert(n, e, crsType) {
+  if (crsType === 'twd67') {
+    const [e97, n97] = proj4('EPSG:3828', 'EPSG:3826', [e, n]);
+    if (!isFinite(e97) || !isFinite(n97)) return null;
+    return [+n97.toFixed(3), +e97.toFixed(3)];
+  }
+  return [+n.toFixed(3), +e.toFixed(3)];
+}
+
+// ── File parsers ─────────────────────────────────────────────────────────────
+function parseCOA(text) {
+  const pts = {};
+  for (const raw of text.split(/\r?\n/)) {
+    if (raw.length < 7) continue;
+    const id = raw.slice(0, 5).trim();
+    if (!id || !/^\d/.test(id)) continue;
+    const coord = raw.slice(6);
+    if (coord.length < 16) continue;
+    const n = parseFloat(coord.slice(0, 16));
+    const e = parseFloat((coord.slice(16, 32) || coord.slice(16)).replace(/[^\d.]/g, ''));
+    if (isFinite(n) && isFinite(e)) pts[id] = [n, e];
+  }
+  return pts;
+}
+
+function parseBNP(text) {
+  const rows = {};
+  for (const line of text.split(/\r?\n/)) {
+    const p = line.trim().split(/\s+/);
+    if (p.length < 5) continue;
+    const m = +p[0], c = +p[1], r = +p[2];
+    if (!isFinite(m) || !isFinite(c) || !isFinite(r)) continue;
+    const k = `${m},${c}`;
+    if (!rows[k]) rows[k] = {};
+    rows[k][r] = p.slice(4).filter(Boolean);
+  }
+  const out = {};
+  for (const [k, rmap] of Object.entries(rows)) {
+    out[k] = Object.keys(rmap).map(Number).sort((a,b)=>a-b).flatMap(r => rmap[r]);
+  }
+  return out;
+}
+
+function parsePAR(text) {
+  const areas = {};
+  for (const line of text.split(/\r?\n/)) {
+    const p = line.trim().split(/\s+/);
+    if (p.length < 4) continue;
+    const a = parseFloat(p[3]);
+    if (isFinite(+p[0]) && isFinite(+p[1]) && isFinite(a))
+      areas[`${+p[0]},${+p[1]}`] = a;
+  }
+  return areas;
+}
+
+const CTL_RE = /^(\d{7}\.\d{3})(\d{6}\.\d{3})/;
+function parseCTL(text) {
+  const pts = [];
+  for (const line of text.split(/\r?\n/)) {
+    const p = line.trim().split(/\s+/);
+    if (p.length < 2 || p[0].toUpperCase().startsWith('KAK')) continue;
+    const m = CTL_RE.exec(p[1]);
+    if (!m) continue;
+    const n = +m[1], e = +m[2];
+    if (isFinite(n) && isFinite(e)) pts.push({ name: p[0], n, e });
+  }
+  return pts;
+}
+
+// ── GeoJSON builder ──────────────────────────────────────────────────────────
+function wrapGeoJSON(features) {
+  return {
+    type: 'FeatureCollection',
+    crs: { type: 'name', properties: { name: 'urn:ogc:def:crs:EPSG::3826' } },
+    features,
+  };
+}
+
+function downloadGeoJSON(obj, filename) {
+  // Build as array of strings to avoid one giant concatenation
+  const parts = ['{"type":"FeatureCollection","crs":{"type":"name","properties":{"name":"urn:ogc:def:crs:EPSG::3826"}},"features":['];
+  obj.features.forEach((f, i) => {
+    if (i > 0) parts.push(',');
+    parts.push(JSON.stringify(f));
+  });
+  parts.push(']}');
+  const blob = new Blob(parts, { type: 'application/json' });
+  triggerDownload(blob, filename);
+}
+
+function triggerDownload(blob, filename) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+}
+
+// ── UI helpers ───────────────────────────────────────────────────────────────
+function setProgress(pct, msg) {
+  document.getElementById('progress-fill').style.width = pct + '%';
+  document.getElementById('progress-text').textContent = msg;
+}
+
+function log(msg) {
+  const el = document.getElementById('log');
+  el.textContent += msg + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+
+function yield_() { return new Promise(r => setTimeout(r, 0)); }
+
+// ── Main processing ──────────────────────────────────────────────────────────
+let baseHandle = null;
+
+async function pickDir() {
+  try {
+    baseHandle = await window.showDirectoryPicker({ mode: 'read' });
+    document.getElementById('lblDir').textContent = '✓ ' + baseHandle.name;
+    document.getElementById('btnRun').disabled = false;
+  } catch (e) {
+    if (e.name !== 'AbortError') alert('無法開啟資料夾：' + e.message);
+  }
+}
+
+async function readText(dirHandle, filename) {
+  try {
+    const fh = await dirHandle.getFileHandle(filename);
+    return await (await fh.getFile()).text();
+  } catch { return null; }
+}
+
+async function findSegCode(dirHandle) {
+  for await (const entry of dirHandle.values()) {
+    if (entry.kind === 'file' && /^KA\d{4}\.COA$/i.test(entry.name))
+      return entry.name.slice(2, 6);
+  }
+  return null;
+}
+
+async function runProcess() {
+  if (!baseHandle) return;
+
+  const doPts = document.getElementById('chk-pts').checked;
+  const doPar = document.getElementById('chk-par').checked;
+  const doCtl = document.getElementById('chk-ctl').checked;
+
+  document.getElementById('progress-section').hidden = false;
+  document.getElementById('result-section').hidden = true;
+  document.getElementById('btnRun').disabled = true;
+  document.getElementById('log').textContent = '';
+
+  // Collect subdirectory handles
+  const dirs = [];
+  for await (const entry of baseHandle.values()) {
+    if (entry.kind === 'directory') dirs.push(entry);
+  }
+  dirs.sort((a, b) => a.name.localeCompare(b.name));
+  log(`找到 ${dirs.length} 個資料夾，開始處理…`);
+
+  const ptFeatures  = [];
+  const parFeatures = [];
+  const ctlMap      = new Map();   // key "n_mm,e_mm" → {segs,names,crs,n,e}
+  const errors      = [];
+
+  for (let i = 0; i < dirs.length; i++) {
+    const dir = dirs[i];
+    if ((i + 1) % 10 === 0) {
+      setProgress(Math.round((i + 1) / dirs.length * 95), `(${i+1}/${dirs.length}) ${dir.name}`);
+      await yield_();
+    }
+
+    const segCode = await findSegCode(dir);
+    if (!segCode) continue;
+
+    const crsType  = CS[segCode] || 'twd67';
+    const segLabel = 'KA' + segCode;
+    const sheetId  = dir.name.startsWith('KA' + segCode)
+      ? (dir.name.slice(6) || 'TOP') : dir.name;
+
+    // COA
+    const coaTxt = await readText(dir, `KA${segCode}.COA`);
+    if (!coaTxt) continue;
+    const rawPts = parseCOA(coaTxt);
+    const pts97  = {};
+
+    for (const [pid, [n, e]] of Object.entries(rawPts)) {
+      const c = convert(n, e, crsType);
+      if (!c) continue;
+      const [n97, e97] = c;
+      pts97[pid] = [n97, e97];
+      if (doPts) ptFeatures.push({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [e97, n97] },
+        properties: { SEG_CODE: segCode, SHEET: sheetId, POINT_ID: pid, N_TWD97: n97, E_TWD97: e97 },
+      });
+    }
+
+    // BNP + PAR
+    if (doPar) {
+      const bnpTxt = await readText(dir, `KA${segCode}.BNP`);
+      if (bnpTxt) {
+        const parTxt = await readText(dir, `KA${segCode}.PAR`);
+        const parcels = parseBNP(bnpTxt);
+        const areas   = parTxt ? parsePAR(parTxt) : {};
+
+        for (const [key, ptIds] of Object.entries(parcels)) {
+          const [m, c] = key.split(',').map(Number);
+          const ring = ptIds.filter(p => pts97[p]).map(p => [pts97[p][1], pts97[p][0]]);
+          if (ring.length < 3) continue;
+          // Close ring
+          if (ring[0][0] !== ring.at(-1)[0] || ring[0][1] !== ring.at(-1)[1])
+            ring.push(ring[0]);
+          if (ring.length < 4) continue;
+          const pno = c ? `${m}-${c}` : String(m);
+          try {
+            parFeatures.push({
+              type: 'Feature',
+              geometry: { type: 'Polygon', coordinates: [ring] },
+              properties: { SEG_CODE: segCode, SHEET: sheetId, MOTHER: m, CHILD: c,
+                            PARCEL_NO: pno, AREA_M2: areas[key] ?? 0 },
+            });
+          } catch (ex) { errors.push(`KA${segCode}/${sheetId} ${pno}: ${ex.message}`); }
+        }
+      }
+    }
+
+    // CTL
+    if (doCtl) {
+      const ctlTxt = await readText(dir, `KA${segCode}.CTL`);
+      if (ctlTxt) {
+        for (const { name, n, e } of parseCTL(ctlTxt)) {
+          const c = convert(n, e, crsType);
+          if (!c) continue;
+          const [n97, e97] = c;
+          const key = `${Math.round(n97 * 1000)},${Math.round(e97 * 1000)}`;
+          if (!ctlMap.has(key)) ctlMap.set(key, { segs: new Set(), names: new Set(), crs: new Set(), n: n97, e: e97 });
+          const rec = ctlMap.get(key);
+          rec.segs.add(segLabel); rec.names.add(name); rec.crs.add(crsType);
+        }
+      }
+    }
+  }
+
+  // Build CTL features
+  const ctlFeatures = [...ctlMap.values()].map(({ segs, names, crs, n, e }) => ({
+    type: 'Feature',
+    geometry: { type: 'Point', coordinates: [e, n] },
+    properties: {
+      SEG_CODE: [...segs].sort().join(', '),
+      PT_NAME:  [...names].sort().join(', '),
+      N_TWD97:  n, E_TWD97: e,
+      CRS:      [...crs].sort().join(', '),
+    },
+  }));
+
+  setProgress(100, '完成！');
+  log(`界址點:  ${ptFeatures.length.toLocaleString()} 筆`);
+  log(`宗地:    ${parFeatures.length.toLocaleString()} 筆`);
+  log(`圖根點:  ${ctlFeatures.length.toLocaleString()} 筆`);
+  if (errors.length) log(`錯誤:    ${errors.length} 筆`);
+
+  // Results UI
+  const stats = [
+    { lbl: '界址點', val: doPts ? ptFeatures.length : null },
+    { lbl: '宗地',   val: doPar ? parFeatures.length : null },
+    { lbl: '圖根點', val: doCtl ? ctlFeatures.length : null },
+    { lbl: '錯誤',   val: errors.length, warn: errors.length > 0 },
+  ];
+  document.getElementById('result-stats').innerHTML = stats.map(s => `
+    <div class="stat-box">
+      <div class="val ${s.warn ? 'style="color:#c05000"' : ''}">${s.val === null ? '—' : s.val.toLocaleString()}</div>
+      <div class="lbl">${s.lbl}</div>
+    </div>`).join('');
+
+  const dlDiv = document.getElementById('dl-btns');
+  dlDiv.innerHTML = '';
+  const outputs = [
+    { flag: doPts, features: ptFeatures,  name: '界址點.geojson' },
+    { flag: doPar, features: parFeatures, name: '宗地.geojson'   },
+    { flag: doCtl, features: ctlFeatures, name: '圖根點.geojson' },
+  ];
+  for (const o of outputs) {
+    if (!o.flag) continue;
+    const btn = document.createElement('button');
+    btn.textContent = `⬇ ${o.name} (${o.features.length.toLocaleString()} 筆)`;
+    btn.onclick = () => downloadGeoJSON(null, o.name, o.features);
+    // store features on button to avoid closure issues
+    btn.dataset.name = o.name;
+    btn._features = o.features;
+    btn.onclick = () => downloadGeoJSON({ features: btn._features }, btn.dataset.name);
+    dlDiv.appendChild(btn);
+  }
+  if (errors.length) {
+    const btn = document.createElement('button');
+    btn.textContent = `⚠ errors.txt (${errors.length} 筆)`;
+    btn.onclick = () => triggerDownload(new Blob([errors.join('\n')], { type: 'text/plain' }), 'errors.txt');
+    dlDiv.appendChild(btn);
+  }
+
+  document.getElementById('result-section').hidden = false;
+  document.getElementById('btnRun').disabled = false;
+}
+
+// ── Config tab ───────────────────────────────────────────────────────────────
+function loadConfig() {
+  const saved = localStorage.getItem('ka_coord_system');
+  CS = saved ? JSON.parse(saved) : { ...DEFAULT_CS };
+}
+
+function saveConfig() {
+  const newCS = {};
+  for (const tr of document.querySelectorAll('#config-tbody tr')) {
+    const inputs = tr.querySelectorAll('input, select');
+    const code = inputs[0]?.value.trim().padStart(4, '0');
+    const crs  = inputs[1]?.value;
+    if (code && (crs === 'twd67' || crs === 'twd97')) newCS[code] = crs;
+  }
+  CS = newCS;
+  localStorage.setItem('ka_coord_system', JSON.stringify(newCS));
+  alert(`已儲存 ${Object.keys(newCS).length} 個段代碼設定`);
+}
+
+function resetConfig() {
+  if (!confirm('將還原為內建預設值，並清除已儲存的設定，確定嗎？')) return;
+  CS = { ...DEFAULT_CS };
+  localStorage.removeItem('ka_coord_system');
+  renderConfigTable();
+}
+
+function renderConfigTable() {
+  const tbody = document.getElementById('config-tbody');
+  tbody.innerHTML = '';
+  for (const [code, crs] of Object.entries(CS).sort(([a],[b]) => a.localeCompare(b))) {
+    tbody.appendChild(makeConfigRow(code, crs));
+  }
+}
+
+function makeConfigRow(code = '', crs = 'twd67') {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td><input type="text" value="${code}" maxlength="4" style="width:5em;font-family:monospace"></td>
+    <td><select>
+      <option value="twd67" ${crs === 'twd67' ? 'selected' : ''}>twd67</option>
+      <option value="twd97" ${crs === 'twd97' ? 'selected' : ''}>twd97</option>
+    </select></td>
+    <td><input type="text" placeholder="（備註）"></td>
+    <td><button onclick="this.closest('tr').remove()" style="padding:2px 8px">✕</button></td>`;
+  return tr;
+}
+
+function addConfigRow() {
+  document.getElementById('config-tbody').appendChild(makeConfigRow());
+}
+
+function exportCSV() {
+  const rows = ['seg_code,crs'];
+  for (const tr of document.querySelectorAll('#config-tbody tr')) {
+    const ins = tr.querySelectorAll('input, select');
+    if (ins[0] && ins[1]) rows.push(`${ins[0].value.trim()},${ins[1].value}`);
+  }
+  triggerDownload(new Blob([rows.join('\n')], { type: 'text/csv' }), 'coord_system.csv');
+}
+
+function importCSV() {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = '.csv';
+  inp.onchange = async () => {
+    const text = await inp.files[0].text();
+    const tbody = document.getElementById('config-tbody');
+    tbody.innerHTML = '';
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim() || line.startsWith('seg_code')) continue;
+      const [code, crs] = line.split(',').map(s => s.trim());
+      if (code && crs) tbody.appendChild(makeConfigRow(code, crs));
+    }
+  };
+  inp.click();
+}
+
+// ── Tab switching ────────────────────────────────────────────────────────────
+function switchTab(btn, name) {
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  btn.classList.add('active');
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+loadConfig();
+renderConfigTable();
+</script>
+</body>
+</html>

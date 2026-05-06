@@ -1,0 +1,13 @@
+# 輸出檔案
+*.geojson
+*.shp
+*.dbf
+*.shx
+*.prj
+*.cpg
+errors.txt
+coord_system.csv
+
+# OS
+.DS_Store
+Thumbs.db
