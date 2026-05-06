@@ -559,7 +559,7 @@ function loadConfig() {
 }
 
 function saveConfig() {
-  // 合併同段代碼不同類型的列 → string 或 {top, sub}
+  // 收集每個段代碼的所有列
   const raw = {};
   for (const tr of document.querySelectorAll('#config-tbody tr')) {
     const inputs = tr.querySelectorAll('input, select');
@@ -572,10 +572,18 @@ function saveConfig() {
   }
   const newCS = {};
   for (const [code, types] of Object.entries(raw)) {
-    if (types['*']) {
-      newCS[code] = types['*'];          // 單一 CRS
-    } else {
-      newCS[code] = { top: types['top'] || 'twd67', sub: types['sub'] || 'twd67' };
+    const wildcard = types['*'];
+    const topCrs   = types['top'];
+    const subCrs   = types['sub'];
+    if (topCrs !== undefined || subCrs !== undefined) {
+      // 有任何明確的 top/sub 列：以 top/sub 為主，'*' 作為備援
+      const resolvedTop = topCrs ?? wildcard ?? 'twd67';
+      const resolvedSub = subCrs ?? wildcard ?? 'twd67';
+      newCS[code] = resolvedTop === resolvedSub
+        ? resolvedTop
+        : { top: resolvedTop, sub: resolvedSub };
+    } else if (wildcard !== undefined) {
+      newCS[code] = wildcard;   // 只有 '*' → 全段統一
     }
   }
   CS = newCS;
@@ -603,9 +611,11 @@ function renderConfigTable() {
   }
 }
 
+const TYPE_LABEL = { '*': '全部', 'top': '頂層', 'sub': '分幅' };
+
 function makeConfigRow(code = '', type = '*', crs = 'twd67') {
   const typeOpts = ['*','top','sub'].map(v =>
-    `<option value="${v}" ${type===v?'selected':''}>${{' *':'全部','top':'頂層','sub':'分幅'}[' '+v]||v}</option>`
+    `<option value="${v}" ${type===v?'selected':''}>${TYPE_LABEL[v]}</option>`
   ).join('');
   const crsOpts = ['twd67','twd97'].map(v =>
     `<option value="${v}" ${crs===v?'selected':''}>${v}</option>`
