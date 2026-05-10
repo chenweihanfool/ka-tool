@@ -366,7 +366,12 @@ let baseHandle = null;
 async function pickDir() {
   try {
     baseHandle = await window.showDirectoryPicker({ mode: 'read' });
-    document.getElementById('lblDir').textContent = '✓ ' + baseHandle.name;
+    const fmt = await detectFormat(baseHandle);
+    const fmtLabel = fmt === 'KC'
+      ? '通霄所（圖解／數值 路徑分類）'
+      : '大湖所（KA 段代碼表）';
+    document.getElementById('lblDir').textContent =
+      `✓ ${baseHandle.name}  ·  ${fmt} ${fmtLabel}`;
     document.getElementById('btnRun').disabled = false;
   } catch (e) {
     if (e.name !== 'AbortError') alert('無法開啟資料夾：' + e.message);
@@ -380,10 +385,63 @@ async function readText(dirHandle, filename) {
   } catch { return null; }
 }
 
-async function findSegCode(dirHandle) {
+// ── Format detection & work-list builders ────────────────────────────────────
+
+async function detectFormat(dirHandle) {
   for await (const entry of dirHandle.values()) {
-    if (entry.kind === 'file' && /^KA\d{4}\.COA$/i.test(entry.name))
-      return entry.name.slice(2, 6);
+    if (entry.kind === 'directory') {
+      if (entry.name === '圖解' || entry.name === '數值') return 'KC';
+      if (/^KA\d{4}/i.test(entry.name)) return 'KA';
+    }
+  }
+  return 'KA';
+}
+
+// Get sorted child dirs inside baseHandle/...path
+async function getSubdirs(baseHandle, ...path) {
+  let h = baseHandle;
+  for (const seg of path) {
+    try { h = await h.getDirectoryHandle(seg); }
+    catch { return []; }
+  }
+  const dirs = [];
+  for await (const e of h.values()) { if (e.kind === 'directory') dirs.push(e); }
+  return dirs.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// Each item: { dir, prefix, crsType(null=lookup from CS), segCode(null=find later) }
+async function buildWorkList(baseHandle) {
+  const fmt = await detectFormat(baseHandle);
+
+  if (fmt === 'KC') {
+    const list = [];
+    // 圖解/*  → always twd67
+    for (const d of await getSubdirs(baseHandle, '圖解'))
+      list.push({ dir: d, prefix: 'KC', crsType: 'twd67' });
+    // 數值/67/* → twd67
+    for (const d of await getSubdirs(baseHandle, '數值', '67'))
+      list.push({ dir: d, prefix: 'KC', crsType: 'twd67' });
+    // 數值/97/* → twd97
+    for (const d of await getSubdirs(baseHandle, '數值', '97'))
+      list.push({ dir: d, prefix: 'KC', crsType: 'twd97' });
+    return { fmt, list };
+  }
+
+  // KA format: flat dirs under base
+  const list = [];
+  for await (const e of baseHandle.values()) {
+    if (e.kind === 'directory') list.push({ dir: e, prefix: 'KA', crsType: null });
+  }
+  list.sort((a, b) => a.dir.name.localeCompare(b.dir.name));
+  return { fmt, list };
+}
+
+// Find seg code from any XX####.COA file in directory
+async function findSegCode(dirHandle) {
+  for await (const e of dirHandle.values()) {
+    if (e.kind !== 'file') continue;
+    const m = /^([A-Z]{2})(\d{4})\.COA$/i.exec(e.name);
+    if (m) return { prefix: m[1].toUpperCase(), segCode: m[2] };
   }
   return null;
 }
@@ -400,36 +458,40 @@ async function runProcess() {
   document.getElementById('btnRun').disabled = true;
   document.getElementById('log').textContent = '';
 
-  // Collect subdirectory handles
-  const dirs = [];
-  for await (const entry of baseHandle.values()) {
-    if (entry.kind === 'directory') dirs.push(entry);
-  }
-  dirs.sort((a, b) => a.name.localeCompare(b.name));
-  log(`找到 ${dirs.length} 個資料夾，開始處理…`);
+  const { fmt, list } = await buildWorkList(baseHandle);
+  log(`格式: ${fmt === 'KC' ? 'KC 通霄所（路徑分類）' : 'KA 大湖所（段代碼表）'}`);
+  log(`找到 ${list.length} 個資料夾，開始處理…`);
 
   const ptFeatures  = [];
   const parFeatures = [];
-  const ctlMap      = new Map();   // key "n_mm,e_mm" → {segs,names,crs,n,e}
+  const ctlMap      = new Map();
   const errors      = [];
 
-  for (let i = 0; i < dirs.length; i++) {
-    const dir = dirs[i];
+  for (let i = 0; i < list.length; i++) {
+    let { dir, prefix, crsType } = list[i];
+
     if ((i + 1) % 10 === 0) {
-      setProgress(Math.round((i + 1) / dirs.length * 95), `(${i+1}/${dirs.length}) ${dir.name}`);
+      setProgress(Math.round((i + 1) / list.length * 95), `(${i+1}/${list.length}) ${dir.name}`);
       await yield_();
     }
 
-    const segCode = await findSegCode(dir);
-    if (!segCode) continue;
+    // Determine segCode (and prefix if not yet set)
+    const found = await findSegCode(dir);
+    if (!found) continue;
+    const segCode = found.segCode;
+    if (!prefix) prefix = found.prefix;
 
-    const crsType  = getCRS(segCode, dir.name);
-    const segLabel = 'KA' + segCode;
-    const sheetId  = dir.name.startsWith('KA' + segCode)
-      ? (dir.name.slice(6) || 'TOP') : dir.name;
+    // CRS: KC = already set from path; KA = lookup table
+    if (crsType === null) crsType = getCRS(segCode, dir.name);
+
+    // sheetId: chars after prefix+segCode (e.g. KC03000001 → '0001'; KA00010001 → '0001')
+    const prefixSeg = prefix + segCode;   // e.g. 'KC0300' or 'KA0001'
+    const sheetId   = dir.name.startsWith(prefixSeg)
+      ? (dir.name.slice(prefixSeg.length) || 'TOP') : dir.name;
+    const segLabel  = prefixSeg;
 
     // COA
-    const coaTxt = await readText(dir, `KA${segCode}.COA`);
+    const coaTxt = await readText(dir, `${prefix}${segCode}.COA`);
     if (!coaTxt) continue;
     const rawPts = parseCOA(coaTxt);
     const pts97  = {};
@@ -448,9 +510,9 @@ async function runProcess() {
 
     // BNP + PAR
     if (doPar) {
-      const bnpTxt = await readText(dir, `KA${segCode}.BNP`);
+      const bnpTxt = await readText(dir, `${prefix}${segCode}.BNP`);
       if (bnpTxt) {
-        const parTxt = await readText(dir, `KA${segCode}.PAR`);
+        const parTxt = await readText(dir, `${prefix}${segCode}.PAR`);
         const parcels = parseBNP(bnpTxt);
         const areas   = parTxt ? parsePAR(parTxt) : {};
 
@@ -458,7 +520,6 @@ async function runProcess() {
           const [m, c] = key.split(',').map(Number);
           const ring = ptIds.filter(p => pts97[p]).map(p => [pts97[p][1], pts97[p][0]]);
           if (ring.length < 3) continue;
-          // Close ring
           if (ring[0][0] !== ring.at(-1)[0] || ring[0][1] !== ring.at(-1)[1])
             ring.push(ring[0]);
           if (ring.length < 4) continue;
@@ -470,14 +531,14 @@ async function runProcess() {
               properties: { SEG_CODE: segCode, SHEET: sheetId, MOTHER: m, CHILD: c,
                             PARCEL_NO: pno, AREA_M2: areas[key] ?? 0 },
             });
-          } catch (ex) { errors.push(`KA${segCode}/${sheetId} ${pno}: ${ex.message}`); }
+          } catch (ex) { errors.push(`${segLabel}/${sheetId} ${pno}: ${ex.message}`); }
         }
       }
     }
 
     // CTL
     if (doCtl) {
-      const ctlTxt = await readText(dir, `KA${segCode}.CTL`);
+      const ctlTxt = await readText(dir, `${prefix}${segCode}.CTL`);
       if (ctlTxt) {
         for (const { name, n, e } of parseCTL(ctlTxt)) {
           const c = convert(n, e, crsType);
