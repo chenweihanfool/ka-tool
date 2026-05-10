@@ -409,31 +409,38 @@ async function getSubdirs(baseHandle, ...path) {
   return dirs.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-// Each item: { dir, prefix, crsType(null=lookup from CS), segCode(null=find later) }
+// Each item: { dir, prefix, crsType(null=lookup from CS), isSubSheet }
+// isSubSheet=true → 圖解 sub-tiles; COA must be merged across all tiles of same segment
 async function buildWorkList(baseHandle) {
   const fmt = await detectFormat(baseHandle);
 
   if (fmt === 'KC') {
     const list = [];
-    // 圖解/*  → always twd67
+    // 圖解/*  → twd67, isSubSheet=true (each dir = one map tile, partial COA)
     for (const d of await getSubdirs(baseHandle, '圖解'))
-      list.push({ dir: d, prefix: 'KC', crsType: 'twd67' });
-    // 數值/67/* → twd67
+      list.push({ dir: d, prefix: 'KC', crsType: 'twd67', isSubSheet: true });
+    // 數值/67/* → twd67, isSubSheet=false (complete COA per dir)
     for (const d of await getSubdirs(baseHandle, '數值', '67'))
-      list.push({ dir: d, prefix: 'KC', crsType: 'twd67' });
-    // 數值/97/* → twd97
+      list.push({ dir: d, prefix: 'KC', crsType: 'twd67', isSubSheet: false });
+    // 數值/97/* → twd97, isSubSheet=false
     for (const d of await getSubdirs(baseHandle, '數值', '97'))
-      list.push({ dir: d, prefix: 'KC', crsType: 'twd97' });
+      list.push({ dir: d, prefix: 'KC', crsType: 'twd97', isSubSheet: false });
     return { fmt, list };
   }
 
-  // KA format: flat dirs under base
+  // KA format: flat dirs under base, all treated as complete (isSubSheet=false)
   const list = [];
   for await (const e of baseHandle.values()) {
-    if (e.kind === 'directory') list.push({ dir: e, prefix: 'KA', crsType: null });
+    if (e.kind === 'directory') list.push({ dir: e, prefix: 'KA', crsType: null, isSubSheet: false });
   }
   list.sort((a, b) => a.dir.name.localeCompare(b.dir.name));
   return { fmt, list };
+}
+
+// Extract seg code from KC sub-sheet dir name (e.g. KC03080004 → {prefix:'KC', segCode:'0308'})
+function parseSubSheetName(dirName) {
+  const m = /^([A-Z]{2})(\d{4})\d+$/i.exec(dirName);
+  return m ? { prefix: m[1].toUpperCase(), segCode: m[2] } : null;
 }
 
 // Find seg code from any XX####.COA file in directory
@@ -444,6 +451,166 @@ async function findSegCode(dirHandle) {
     if (m) return { prefix: m[1].toUpperCase(), segCode: m[2] };
   }
   return null;
+}
+
+// ── Single-dir processing helper (used for both KA dirs and KC 數值 dirs) ──────
+async function processOneDir({ dir, prefix, crsType, isSubSheet },
+                              doPts, doPar, doCtl,
+                              ptFeatures, parFeatures, ctlMap, errors) {
+  // Determine segCode
+  let segCode;
+  if (isSubSheet) {
+    const p = parseSubSheetName(dir.name);
+    if (!p) return;
+    segCode = p.segCode; prefix = p.prefix;
+  } else {
+    const found = await findSegCode(dir);
+    if (!found) return;
+    segCode = found.segCode;
+    if (!prefix) prefix = found.prefix;
+  }
+
+  if (crsType === null) crsType = getCRS(segCode, dir.name);
+
+  const prefixSeg = prefix + segCode;
+  const sheetId   = dir.name.startsWith(prefixSeg)
+    ? (dir.name.slice(prefixSeg.length) || 'TOP') : dir.name;
+  const segLabel  = prefixSeg;
+
+  const coaTxt = await readText(dir, `${prefix}${segCode}.COA`);
+  if (!coaTxt) return;
+  const rawPts = parseCOA(coaTxt);
+  const pts97  = {};
+
+  for (const [pid, [n, e]] of Object.entries(rawPts)) {
+    const c = convert(n, e, crsType);
+    if (!c) continue;
+    const [n97, e97] = c;
+    pts97[pid] = [n97, e97];
+    if (doPts) ptFeatures.push({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [e97, n97] },
+      properties: { SEG_CODE: segCode, SHEET: sheetId, POINT_ID: pid, N_TWD97: n97, E_TWD97: e97 },
+    });
+  }
+
+  if (doPar) {
+    const bnpTxt = await readText(dir, `${prefix}${segCode}.BNP`);
+    if (bnpTxt) {
+      const parTxt = await readText(dir, `${prefix}${segCode}.PAR`);
+      const parcels = parseBNP(bnpTxt);
+      const areas   = parTxt ? parsePAR(parTxt) : {};
+      for (const [key, ptIds] of Object.entries(parcels)) {
+        const [m, c] = key.split(',').map(Number);
+        const ring = ptIds.filter(p => pts97[p]).map(p => [pts97[p][1], pts97[p][0]]);
+        if (ring.length < 3) continue;
+        if (ring[0][0] !== ring.at(-1)[0] || ring[0][1] !== ring.at(-1)[1]) ring.push(ring[0]);
+        if (ring.length < 4) continue;
+        const pno = c ? `${m}-${c}` : String(m);
+        try {
+          parFeatures.push({
+            type: 'Feature',
+            geometry: { type: 'Polygon', coordinates: [ring] },
+            properties: { SEG_CODE: segCode, SHEET: sheetId, MOTHER: m, CHILD: c,
+                          PARCEL_NO: pno, AREA_M2: areas[key] ?? 0 },
+          });
+        } catch (ex) { errors.push(`${segLabel}/${sheetId} ${pno}: ${ex.message}`); }
+      }
+    }
+  }
+
+  if (doCtl) {
+    const ctlTxt = await readText(dir, `${prefix}${segCode}.CTL`);
+    if (ctlTxt) {
+      for (const { name, n, e } of parseCTL(ctlTxt)) {
+        const c = convert(n, e, crsType);
+        if (!c) continue;
+        const [n97, e97] = c;
+        const key = `${Math.round(n97 * 1000)},${Math.round(e97 * 1000)}`;
+        if (!ctlMap.has(key)) ctlMap.set(key, { segs: new Set(), names: new Set(), crs: new Set(), n: n97, e: e97 });
+        const rec = ctlMap.get(key);
+        rec.segs.add(segLabel); rec.names.add(name); rec.crs.add(crsType);
+      }
+    }
+  }
+}
+
+// ── Sub-sheet group processing: merge COA across all tiles, then build polygons ─
+async function processSubSheetGroup(segCode, items,
+                                     doPts, doPar, doCtl,
+                                     ptFeatures, parFeatures, ctlMap) {
+  const crsType  = items[0].crsType;
+  const prefix   = items[0].prefix || 'KC';
+  const segLabel = prefix + segCode;
+
+  // 1. Merge ALL COA points across all tiles (dedup by point id)
+  const pts97 = {};
+  for (const { dir } of items) {
+    const coaTxt = await readText(dir, `${prefix}${segCode}.COA`);
+    if (!coaTxt) continue;
+    for (const [pid, [n, e]] of Object.entries(parseCOA(coaTxt))) {
+      if (pts97[pid]) continue;              // already have this point
+      const c = convert(n, e, crsType);
+      if (!c) continue;
+      const [n97, e97] = c;
+      pts97[pid] = [n97, e97];
+      if (doPts) ptFeatures.push({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [e97, n97] },
+        properties: { SEG_CODE: segCode, SHEET: 'MERGED', POINT_ID: pid, N_TWD97: n97, E_TWD97: e97 },
+      });
+    }
+  }
+
+  // 2. Collect parcels from all tile BNPs (dedup by parcel key, first tile wins)
+  if (doPar) {
+    const allParcels = {};
+    let   areas      = {};
+    for (const { dir } of items) {
+      const bnpTxt = await readText(dir, `${prefix}${segCode}.BNP`);
+      if (!bnpTxt) continue;
+      if (Object.keys(areas).length === 0) {
+        const parTxt = await readText(dir, `${prefix}${segCode}.PAR`);
+        if (parTxt) areas = parsePAR(parTxt);
+      }
+      for (const [k, ptIds] of Object.entries(parseBNP(bnpTxt))) {
+        if (!allParcels[k]) allParcels[k] = ptIds;
+      }
+    }
+
+    for (const [key, ptIds] of Object.entries(allParcels)) {
+      const [m, c] = key.split(',').map(Number);
+      const ring = ptIds.filter(p => pts97[p]).map(p => [pts97[p][1], pts97[p][0]]);
+      if (ring.length < 3) continue;
+      if (ring[0][0] !== ring.at(-1)[0] || ring[0][1] !== ring.at(-1)[1]) ring.push(ring[0]);
+      if (ring.length < 4) continue;
+      const pno = c ? `${m}-${c}` : String(m);
+      parFeatures.push({
+        type: 'Feature',
+        geometry: { type: 'Polygon', coordinates: [ring] },
+        properties: { SEG_CODE: segCode, SHEET: 'MERGED', MOTHER: m, CHILD: c,
+                      PARCEL_NO: pno, AREA_M2: areas[key] ?? 0 },
+      });
+    }
+  }
+
+  // 3. CTL — only need one tile's file (points are the same across the segment)
+  if (doCtl) {
+    for (const { dir } of items) {
+      const ctlTxt = await readText(dir, `${prefix}${segCode}.CTL`);
+      if (!ctlTxt) continue;
+      for (const { name, n, e } of parseCTL(ctlTxt)) {
+        const c = convert(n, e, crsType);
+        if (!c) continue;
+        const [n97, e97] = c;
+        const key = `${Math.round(n97 * 1000)},${Math.round(e97 * 1000)}`;
+        if (!ctlMap.has(key)) ctlMap.set(key, { segs: new Set(), names: new Set(), crs: new Set(), n: n97, e: e97 });
+        const rec = ctlMap.get(key);
+        rec.segs.add(segLabel); rec.names.add(name); rec.crs.add(crsType);
+      }
+      break; // one tile is enough for CTL
+    }
+  }
 }
 
 async function runProcess() {
@@ -467,90 +634,55 @@ async function runProcess() {
   const ctlMap      = new Map();
   const errors      = [];
 
-  for (let i = 0; i < list.length; i++) {
-    let { dir, prefix, crsType } = list[i];
+  // ── Split into sub-sheet groups (KC 圖解) and regular dirs ──────────────────
+  const subItems     = list.filter(x => x.isSubSheet);
+  const regularItems = list.filter(x => !x.isSubSheet);
 
-    if ((i + 1) % 10 === 0) {
-      setProgress(Math.round((i + 1) / list.length * 95), `(${i+1}/${list.length}) ${dir.name}`);
+  // Group sub-sheet items by segment code (parse from dir name directly)
+  const subGroups = {};   // segCode → [{dir, prefix, crsType}]
+  for (const item of subItems) {
+    const p = parseSubSheetName(item.dir.name);
+    if (!p) continue;
+    item.segCode = p.segCode;
+    item.prefix  = p.prefix;
+    (subGroups[p.segCode] ??= []).push(item);
+  }
+
+  // Build set of seg codes covered by 數值 dirs (to log overlaps)
+  const suValSegSet = new Set();
+  for (const item of regularItems) {
+    // Quick name-based guess (KC####)
+    const m = /^([A-Z]{2})(\d{4})$/i.exec(item.dir.name);
+    if (m) suValSegSet.add(m[2]);
+  }
+
+  // ── Process 圖解 sub-sheet groups ────────────────────────────────────────────
+  const groupEntries = Object.entries(subGroups).sort(([a],[b]) => a.localeCompare(b));
+  log(`圖解: ${groupEntries.length} 個地段（${subItems.length} 個分幅目錄）`);
+  for (let gi = 0; gi < groupEntries.length; gi++) {
+    const [segCode, items] = groupEntries[gi];
+    if ((gi % 5) === 0) {
+      setProgress(Math.round((gi / Math.max(groupEntries.length, 1)) * 45),
+                  `圖解 (${gi+1}/${groupEntries.length}) KC${segCode}`);
       await yield_();
     }
-
-    // Determine segCode (and prefix if not yet set)
-    const found = await findSegCode(dir);
-    if (!found) continue;
-    const segCode = found.segCode;
-    if (!prefix) prefix = found.prefix;
-
-    // CRS: KC = already set from path; KA = lookup table
-    if (crsType === null) crsType = getCRS(segCode, dir.name);
-
-    // sheetId: chars after prefix+segCode (e.g. KC03000001 → '0001'; KA00010001 → '0001')
-    const prefixSeg = prefix + segCode;   // e.g. 'KC0300' or 'KA0001'
-    const sheetId   = dir.name.startsWith(prefixSeg)
-      ? (dir.name.slice(prefixSeg.length) || 'TOP') : dir.name;
-    const segLabel  = prefixSeg;
-
-    // COA
-    const coaTxt = await readText(dir, `${prefix}${segCode}.COA`);
-    if (!coaTxt) continue;
-    const rawPts = parseCOA(coaTxt);
-    const pts97  = {};
-
-    for (const [pid, [n, e]] of Object.entries(rawPts)) {
-      const c = convert(n, e, crsType);
-      if (!c) continue;
-      const [n97, e97] = c;
-      pts97[pid] = [n97, e97];
-      if (doPts) ptFeatures.push({
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: [e97, n97] },
-        properties: { SEG_CODE: segCode, SHEET: sheetId, POINT_ID: pid, N_TWD97: n97, E_TWD97: e97 },
-      });
+    if (suValSegSet.has(segCode)) {
+      log(`  KC${segCode}: 圖解+數值 皆存在，合併輸出（可能重疊）`);
     }
+    await processSubSheetGroup(segCode, items, doPts, doPar, doCtl,
+                                ptFeatures, parFeatures, ctlMap);
+  }
 
-    // BNP + PAR
-    if (doPar) {
-      const bnpTxt = await readText(dir, `${prefix}${segCode}.BNP`);
-      if (bnpTxt) {
-        const parTxt = await readText(dir, `${prefix}${segCode}.PAR`);
-        const parcels = parseBNP(bnpTxt);
-        const areas   = parTxt ? parsePAR(parTxt) : {};
-
-        for (const [key, ptIds] of Object.entries(parcels)) {
-          const [m, c] = key.split(',').map(Number);
-          const ring = ptIds.filter(p => pts97[p]).map(p => [pts97[p][1], pts97[p][0]]);
-          if (ring.length < 3) continue;
-          if (ring[0][0] !== ring.at(-1)[0] || ring[0][1] !== ring.at(-1)[1])
-            ring.push(ring[0]);
-          if (ring.length < 4) continue;
-          const pno = c ? `${m}-${c}` : String(m);
-          try {
-            parFeatures.push({
-              type: 'Feature',
-              geometry: { type: 'Polygon', coordinates: [ring] },
-              properties: { SEG_CODE: segCode, SHEET: sheetId, MOTHER: m, CHILD: c,
-                            PARCEL_NO: pno, AREA_M2: areas[key] ?? 0 },
-            });
-          } catch (ex) { errors.push(`${segLabel}/${sheetId} ${pno}: ${ex.message}`); }
-        }
-      }
+  // ── Process regular dirs (KC 數值 + KA) ─────────────────────────────────────
+  log(`數值/KA: ${regularItems.length} 個目錄`);
+  for (let i = 0; i < regularItems.length; i++) {
+    if ((i % 10) === 0) {
+      setProgress(45 + Math.round((i / Math.max(regularItems.length, 1)) * 50),
+                  `(${i+1}/${regularItems.length}) ${regularItems[i].dir.name}`);
+      await yield_();
     }
-
-    // CTL
-    if (doCtl) {
-      const ctlTxt = await readText(dir, `${prefix}${segCode}.CTL`);
-      if (ctlTxt) {
-        for (const { name, n, e } of parseCTL(ctlTxt)) {
-          const c = convert(n, e, crsType);
-          if (!c) continue;
-          const [n97, e97] = c;
-          const key = `${Math.round(n97 * 1000)},${Math.round(e97 * 1000)}`;
-          if (!ctlMap.has(key)) ctlMap.set(key, { segs: new Set(), names: new Set(), crs: new Set(), n: n97, e: e97 });
-          const rec = ctlMap.get(key);
-          rec.segs.add(segLabel); rec.names.add(name); rec.crs.add(crsType);
-        }
-      }
-    }
+    await processOneDir(regularItems[i], doPts, doPar, doCtl,
+                        ptFeatures, parFeatures, ctlMap, errors);
   }
 
   // Build CTL features
