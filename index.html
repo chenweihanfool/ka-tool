@@ -511,12 +511,14 @@ async function processOneDir({ dir, prefix, crsType },
   }
 
   if (doPar && bnpTxt) {
+    const parcelKeys = Object.keys(parcels);
+    let builtCount = 0, skipCount = 0;
     for (const [key, ptIds] of Object.entries(parcels)) {
       const [m, c] = key.split(',').map(Number);
       const ring = ptIds.filter(p => pts97[p]).map(p => [pts97[p][1], pts97[p][0]]);
-      if (ring.length < 3) continue;
+      if (ring.length < 3) { skipCount++; continue; }
       if (ring[0][0] !== ring.at(-1)[0] || ring[0][1] !== ring.at(-1)[1]) ring.push(ring[0]);
-      if (ring.length < 4) continue;
+      if (ring.length < 4) { skipCount++; continue; }
       const pno = c ? `${m}-${c}` : String(m);
       try {
         parFeatures.push({
@@ -525,8 +527,13 @@ async function processOneDir({ dir, prefix, crsType },
           properties: { SEG_CODE: segCode, SHEET: sheetId, MOTHER: m, CHILD: c,
                         PARCEL_NO: pno, AREA_M2: areas[key] ?? 0 },
         });
+        builtCount++;
       } catch (ex) { errors.push(`${segLabel}/${sheetId} ${pno}: ${ex.message}`); }
     }
+    if (skipCount > 0)
+      log(`  ⚠ ${segLabel}/${sheetId}: COA ${Object.keys(pts97).length}pt, BNP ${parcelKeys.length}宗 → 建成${builtCount} 跳過${skipCount}`);
+  } else if (doPar && !bnpTxt) {
+    log(`  ⚠ ${segLabel}/${sheetId}: 無 BNP 檔`);
   }
 
   if (doCtl) {
