@@ -453,6 +453,28 @@ async function findSegCode(dirHandle) {
   return null;
 }
 
+// Build pid→parcel-number reverse map from already-parsed parcels object
+function buildPtParcels(parcels) {
+  const ptParcels = {};   // pid → Set<pno>
+  for (const [key, ptIds] of Object.entries(parcels)) {
+    const [m, c] = key.split(',').map(Number);
+    const pno = c ? `${m}-${c}` : String(m);
+    for (const pid of ptIds) {
+      (ptParcels[pid] ??= new Set()).add(pno);
+    }
+  }
+  return ptParcels;
+}
+
+// Sort parcel number strings numerically (mother then child)
+function sortParcelNos(set) {
+  return [...set].sort((a, b) => {
+    const [am, ac = '0'] = a.split('-');
+    const [bm, bc = '0'] = b.split('-');
+    return (+am - +bm) || (+ac - +bc);
+  }).join(', ');
+}
+
 // ── Single-dir processing helper (used for both KA dirs and KC 數值 dirs) ──────
 async function processOneDir({ dir, prefix, crsType, isSubSheet },
                               doPts, doPar, doCtl,
@@ -480,8 +502,20 @@ async function processOneDir({ dir, prefix, crsType, isSubSheet },
   const coaTxt = await readText(dir, `${prefix}${segCode}.COA`);
   if (!coaTxt) return;
   const rawPts = parseCOA(coaTxt);
-  const pts97  = {};
 
+  // Read BNP early to build pid→parcel reverse map for point annotation
+  const bnpTxt  = await readText(dir, `${prefix}${segCode}.BNP`);
+  let parcels   = {};
+  let areas     = {};
+  let ptParcels = {};
+  if (bnpTxt) {
+    parcels   = parseBNP(bnpTxt);
+    const parTxt = await readText(dir, `${prefix}${segCode}.PAR`);
+    if (parTxt) areas = parsePAR(parTxt);
+    ptParcels = buildPtParcels(parcels);
+  }
+
+  const pts97 = {};
   for (const [pid, [n, e]] of Object.entries(rawPts)) {
     const c = convert(n, e, crsType);
     if (!c) continue;
@@ -490,32 +524,28 @@ async function processOneDir({ dir, prefix, crsType, isSubSheet },
     if (doPts) ptFeatures.push({
       type: 'Feature',
       geometry: { type: 'Point', coordinates: [e97, n97] },
-      properties: { SEG_CODE: segCode, SHEET: sheetId, POINT_ID: pid, N_TWD97: n97, E_TWD97: e97 },
+      properties: { SEG_CODE: segCode, SHEET: sheetId, POINT_ID: pid,
+                    N_TWD97: n97, E_TWD97: e97,
+                    PARCEL_NO: sortParcelNos(ptParcels[pid] ?? new Set()) },
     });
   }
 
-  if (doPar) {
-    const bnpTxt = await readText(dir, `${prefix}${segCode}.BNP`);
-    if (bnpTxt) {
-      const parTxt = await readText(dir, `${prefix}${segCode}.PAR`);
-      const parcels = parseBNP(bnpTxt);
-      const areas   = parTxt ? parsePAR(parTxt) : {};
-      for (const [key, ptIds] of Object.entries(parcels)) {
-        const [m, c] = key.split(',').map(Number);
-        const ring = ptIds.filter(p => pts97[p]).map(p => [pts97[p][1], pts97[p][0]]);
-        if (ring.length < 3) continue;
-        if (ring[0][0] !== ring.at(-1)[0] || ring[0][1] !== ring.at(-1)[1]) ring.push(ring[0]);
-        if (ring.length < 4) continue;
-        const pno = c ? `${m}-${c}` : String(m);
-        try {
-          parFeatures.push({
-            type: 'Feature',
-            geometry: { type: 'Polygon', coordinates: [ring] },
-            properties: { SEG_CODE: segCode, SHEET: sheetId, MOTHER: m, CHILD: c,
-                          PARCEL_NO: pno, AREA_M2: areas[key] ?? 0 },
-          });
-        } catch (ex) { errors.push(`${segLabel}/${sheetId} ${pno}: ${ex.message}`); }
-      }
+  if (doPar && bnpTxt) {
+    for (const [key, ptIds] of Object.entries(parcels)) {
+      const [m, c] = key.split(',').map(Number);
+      const ring = ptIds.filter(p => pts97[p]).map(p => [pts97[p][1], pts97[p][0]]);
+      if (ring.length < 3) continue;
+      if (ring[0][0] !== ring.at(-1)[0] || ring[0][1] !== ring.at(-1)[1]) ring.push(ring[0]);
+      if (ring.length < 4) continue;
+      const pno = c ? `${m}-${c}` : String(m);
+      try {
+        parFeatures.push({
+          type: 'Feature',
+          geometry: { type: 'Polygon', coordinates: [ring] },
+          properties: { SEG_CODE: segCode, SHEET: sheetId, MOTHER: m, CHILD: c,
+                        PARCEL_NO: pno, AREA_M2: areas[key] ?? 0 },
+        });
+      } catch (ex) { errors.push(`${segLabel}/${sheetId} ${pno}: ${ex.message}`); }
     }
   }
 
@@ -543,41 +573,51 @@ async function processSubSheetGroup(segCode, items,
   const prefix   = items[0].prefix || 'KC';
   const segLabel = prefix + segCode;
 
-  // 1. Merge ALL COA points across all tiles (dedup by point id)
+  // 1. Merge ALL COA points across all tiles → raw coord map (no features yet)
   const pts97 = {};
   for (const { dir } of items) {
     const coaTxt = await readText(dir, `${prefix}${segCode}.COA`);
     if (!coaTxt) continue;
     for (const [pid, [n, e]] of Object.entries(parseCOA(coaTxt))) {
-      if (pts97[pid]) continue;              // already have this point
+      if (pts97[pid]) continue;
       const c = convert(n, e, crsType);
       if (!c) continue;
-      const [n97, e97] = c;
-      pts97[pid] = [n97, e97];
-      if (doPts) ptFeatures.push({
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: [e97, n97] },
-        properties: { SEG_CODE: segCode, SHEET: 'MERGED', POINT_ID: pid, N_TWD97: n97, E_TWD97: e97 },
-      });
+      pts97[pid] = c;   // [n97, e97]
     }
   }
 
   // 2. Collect parcels from all tile BNPs (dedup by parcel key, first tile wins)
-  if (doPar) {
-    const allParcels = {};
-    let   areas      = {};
-    for (const { dir } of items) {
-      const bnpTxt = await readText(dir, `${prefix}${segCode}.BNP`);
-      if (!bnpTxt) continue;
-      if (Object.keys(areas).length === 0) {
-        const parTxt = await readText(dir, `${prefix}${segCode}.PAR`);
-        if (parTxt) areas = parsePAR(parTxt);
-      }
-      for (const [k, ptIds] of Object.entries(parseBNP(bnpTxt))) {
-        if (!allParcels[k]) allParcels[k] = ptIds;
-      }
+  //    Also build pid→parcel reverse map for point annotation
+  const allParcels = {};
+  let   areas      = {};
+  for (const { dir } of items) {
+    const bnpTxt = await readText(dir, `${prefix}${segCode}.BNP`);
+    if (!bnpTxt) continue;
+    if (Object.keys(areas).length === 0) {
+      const parTxt = await readText(dir, `${prefix}${segCode}.PAR`);
+      if (parTxt) areas = parsePAR(parTxt);
     }
+    for (const [k, ptIds] of Object.entries(parseBNP(bnpTxt))) {
+      if (!allParcels[k]) allParcels[k] = ptIds;
+    }
+  }
+  const ptParcels = buildPtParcels(allParcels);
 
+  // 3. Create point features with PARCEL_NO
+  if (doPts) {
+    for (const [pid, [n97, e97]] of Object.entries(pts97)) {
+      ptFeatures.push({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [e97, n97] },
+        properties: { SEG_CODE: segCode, SHEET: 'MERGED', POINT_ID: pid,
+                      N_TWD97: n97, E_TWD97: e97,
+                      PARCEL_NO: sortParcelNos(ptParcels[pid] ?? new Set()) },
+      });
+    }
+  }
+
+  // 4. Build polygon features
+  if (doPar) {
     for (const [key, ptIds] of Object.entries(allParcels)) {
       const [m, c] = key.split(',').map(Number);
       const ring = ptIds.filter(p => pts97[p]).map(p => [pts97[p][1], pts97[p][0]]);
