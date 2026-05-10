@@ -414,8 +414,21 @@ async function buildWorkList(baseHandle) {
 
   if (fmt === 'KC') {
     const list = [];
-    for (const d of await getSubdirs(baseHandle, '圖解'))
+
+    // 先收集「數值」已有的段代碼（KC0308 → '0308'）
+    const suValSegs = new Set();
+    for (const d of await getSubdirs(baseHandle, '數值', '67'))
+      suValSegs.add(d.name.replace(/^[A-Z]{2}/i, ''));
+    for (const d of await getSubdirs(baseHandle, '數值', '97'))
+      suValSegs.add(d.name.replace(/^[A-Z]{2}/i, ''));
+
+    // 圖解：若該段代碼已有「數值」資料夾，跳過此分幅（避免產生重疊三角形）
+    for (const d of await getSubdirs(baseHandle, '圖解')) {
+      const m = /^[A-Z]{2}(\d{4})/i.exec(d.name);
+      if (m && suValSegs.has(m[1])) continue;
       list.push({ dir: d, prefix: 'KC', crsType: 'twd67' });
+    }
+
     for (const d of await getSubdirs(baseHandle, '數值', '67'))
       list.push({ dir: d, prefix: 'KC', crsType: 'twd67' });
     for (const d of await getSubdirs(baseHandle, '數值', '97'))
