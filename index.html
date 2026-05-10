@@ -586,10 +586,13 @@ async function processSubSheetGroup(segCode, items,
     }
   }
 
-  // 2. Collect parcels from all tile BNPs (dedup by parcel key, first tile wins)
-  //    Also build pid→parcel reverse map for point annotation
-  const allParcels = {};
-  let   areas      = {};
+  // 2. Merge BNP rows across ALL tiles at row-number level.
+  //    A parcel spanning tiles has its rows split across tile BNPs;
+  //    "first tile wins" loses rows from other tiles → incomplete rings → spikes.
+  //    Solution: accumulate {parcelKey → {rowNum → [ptIds]}} across tiles,
+  //    then flatten in row-number order to get the complete point sequence.
+  const bnpRows  = {};   // parcelKey → { rowNum: [ptIds] }
+  let   areas    = {};
   for (const { dir } of items) {
     const bnpTxt = await readText(dir, `${prefix}${segCode}.BNP`);
     if (!bnpTxt) continue;
@@ -597,9 +600,20 @@ async function processSubSheetGroup(segCode, items,
       const parTxt = await readText(dir, `${prefix}${segCode}.PAR`);
       if (parTxt) areas = parsePAR(parTxt);
     }
-    for (const [k, ptIds] of Object.entries(parseBNP(bnpTxt))) {
-      if (!allParcels[k]) allParcels[k] = ptIds;
+    for (const line of bnpTxt.split(/\r?\n/)) {
+      const p = line.trim().split(/\s+/);
+      if (p.length < 5) continue;
+      const m = +p[0], c = +p[1], r = +p[2];
+      if (!isFinite(m) || !isFinite(c) || !isFinite(r)) continue;
+      const k = `${m},${c}`;
+      if (!bnpRows[k]) bnpRows[k] = {};
+      if (!bnpRows[k][r]) bnpRows[k][r] = p.slice(4).filter(Boolean); // first tile's row wins
     }
+  }
+  // Reconstruct complete point sequences from merged rows
+  const allParcels = {};
+  for (const [k, rmap] of Object.entries(bnpRows)) {
+    allParcels[k] = Object.keys(rmap).map(Number).sort((a, b) => a - b).flatMap(r => rmap[r]);
   }
   const ptParcels = buildPtParcels(allParcels);
 
