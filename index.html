@@ -142,6 +142,11 @@
         <button onclick="pickSurveyDir()">📁 選擇資料夾…</button>
         <span id="lblSurveyDir" style="color:#888">尚未選擇（資料夾含 KA####.D14 等檔案）</span>
       </div>
+      <div style="margin-top:10px;display:flex;align-items:center;gap:10px">
+        <label style="font-size:13px;font-weight:600;color:#1a3a5c">放樣日期：</label>
+        <input type="date" id="surveyDate" style="padding:4px 8px;border:1px solid #d8dde8;border-radius:4px;font-size:13px">
+        <span style="font-size:11px;color:#888">（用於命名輸出檔案及 Google Maps 清單）</span>
+      </div>
     </div>
 
     <div class="card">
@@ -149,6 +154,7 @@
       <div class="check-group">
         <label><input type="checkbox" id="surv-chk-pts" checked> 界址點（D14）</label>
         <label><input type="checkbox" id="surv-chk-sub" checked> 参考點（D14 小數編碼）</label>
+        <label><input type="checkbox" id="surv-chk-q"   checked> 補點（D20 Q 開頭）</label>
         <label><input type="checkbox" id="surv-chk-cad" checked> 地籍圖線段（D21）</label>
         <label><input type="checkbox" id="surv-chk-ref" checked> 参考線（D29）</label>
       </div>
@@ -976,6 +982,8 @@ function switchTab(btn, name) {
 // ── Init ─────────────────────────────────────────────────────────────────────
 loadConfig();
 renderConfigTable();
+// 預設放樣日期為今天
+document.getElementById('surveyDate').value = new Date().toISOString().slice(0,10);
 
 // 版本徽章
 document.getElementById('ver-badge').textContent = APP_VERSION;
@@ -1214,11 +1222,12 @@ function newLayerId(name) {
 let _surveyDir = null;
 // 上次處理結果（供地號選擇器使用）
 // 術語：整數點=界址點(COT_REF=0), 小數點=參考點(COT_REF>0), Q開頭=補點(D20)
-let _sPtMain  = new Map();   // COT_NUMBER(str) → {x,y}  界址點
-let _sSub     = new Map();   // "N.M"(str)      → {x,y}  參考點
-let _sD20     = [];          // D20 records      補點(Q prefix)
-let _sD2B     = [];          // D2B records      宗地→界址點對照
-let _sCaseId  = '';
+let _sPtMain      = new Map();   // COT_NUMBER(str) → {x,y}  界址點
+let _sSub         = new Map();   // "N.M"(str)      → {x,y}  參考點
+let _sD20         = [];          // D20 records      補點(Q prefix)
+let _sD2B         = [];          // D2B records      宗地→界址點對照
+let _sCaseId      = '';
+let _sSurveyDate  = '';          // 放樣日期（使用者輸入）
 
 // ── 地號選擇器 ────────────────────────────────────────────────────────────────
 // 從 D2B 建立地號清單（直接記錄宗地邊界點，比走 D21 拓撲更可靠）
@@ -1330,9 +1339,8 @@ function downloadGoogleKML() {
   const vals = [...sel.selectedOptions].map(o => o.value);
   if (!vals.length) { alert('請先選擇地號'); return; }
 
-  // KML 清單名稱 = 日期（從案號解析，或今天）
-  const today = new Date().toLocaleDateString('zh-TW',{year:'numeric',month:'2-digit',day:'2-digit'}).replace(/\//g,'-');
-  const docName = `${today} ${_sCaseId}`;
+  // KML Document name = 放樣日期（使用者輸入）
+  const docName = _sSurveyDate || new Date().toISOString().slice(0,10);
 
   const marks = [];
   let skipped = 0;
@@ -1345,11 +1353,17 @@ function downloadGoogleKML() {
     const [lon, lat] = proj4('EPSG:3826', 'EPSG:4326', [ct.x, ct.y]);
     if (!isFinite(lon) || !isFinite(lat)) { skipped++; continue; }
 
-    const label = c > 0 ? `${m}-${c}` : String(m);
-    const desc  = `地段${sec}，地號${label}`;
+    const parcelLabel = c > 0 ? `${m}-${c}` : String(m);
+    // 中文段名：用 SEG_NAMES 查詢，補 0 到 4 位
+    const segCode = String(sec).padStart(4, '0');
+    const segName = (typeof SEG_NAMES !== 'undefined' && SEG_NAMES[segCode])
+      ? SEG_NAMES[segCode] : `段${sec}`;
+    // Placemark 名稱 = 放樣日期 中文段名 地號
+    const pmName = `${docName} ${segName} ${parcelLabel}`;
+    const desc   = `地號: ${parcelLabel}`;
     marks.push(
       `  <Placemark>\n` +
-      `    <name>${label}</name>\n` +
+      `    <name>${pmName}</name>\n` +
       `    <description>${desc}</description>\n` +
       `    <Point><coordinates>${lon.toFixed(7)},${lat.toFixed(7)},0</coordinates></Point>\n` +
       `  </Placemark>`
@@ -1412,24 +1426,17 @@ async function runSurvey() {
 
   const doPts = document.getElementById('surv-chk-pts').checked;
   const doSub = document.getElementById('surv-chk-sub').checked;
+  const doQ   = document.getElementById('surv-chk-q').checked;
   const doCad = document.getElementById('surv-chk-cad').checked;
   const doRef = document.getElementById('surv-chk-ref').checked;
+  // 放樣日期從 UI 讀取
+  const stakeoutDate = document.getElementById('surveyDate').value || new Date().toISOString().slice(0,10);
 
   try {
     sProg(5, '掃描資料夾…');
-    const caseId = _surveyDir.name; // e.g. KA1153
-    let caseDate = new Date().toISOString().slice(0,10);
-
-    // Find date from XXXXXXX.txt (ROC date format)
-    for await (const entry of _surveyDir.values()) {
-      if (entry.kind==='file' && /^\d{7}\.txt$/i.test(entry.name)) {
-        const s = entry.name.slice(0,7);
-        const adYear = parseInt(s.slice(0,3)) + 1911;
-        caseDate = `${adYear}-${s.slice(3,5)}-${s.slice(5,7)}`;
-        break;
-      }
-    }
-    sLog(`案號: ${caseId}  日期: ${caseDate}`);
+    const caseId   = _surveyDir.name;
+    const caseDate = stakeoutDate;   // 使用者輸入的放樣日期
+    sLog(`案號: ${caseId}  放樣日期: ${caseDate}`);
 
     // Find prefix from KA####.D14 pattern
     let prefix = null, segNum = null;
@@ -1618,6 +1625,29 @@ async function runSurvey() {
       sLog(`参考線: ${rows.length} 筆`);
     }
 
+    // 5. 補點 (D20 Q 開頭)
+    if (doQ && d20.length > 0) {
+      const rows = d20.map(r => {
+        const x = parseFloat(r.CTL_X), y = parseFloat(r.CTL_Y);
+        if (!isFinite(x) || !isFinite(y) || !r.CTL_NAME) return null;
+        return {
+          geom:      wkbPoint(x, y),
+          CTL_NAME:  r.CTL_NAME,
+          CTL_Y:     y, CTL_X: x,
+          CTL_LEVEL: r.CTL_LEVEL,
+          CTL_MODE:  r.CTL_MODE,
+        };
+      }).filter(Boolean);
+      layerDefs.push({
+        name: '補點', geomType: 'POINT',
+        attrs: [{name:'CTL_NAME',type:'TEXT'},{name:'CTL_Y',type:'REAL'},
+                {name:'CTL_X',type:'REAL'},{name:'CTL_LEVEL',type:'TEXT'},
+                {name:'CTL_MODE',type:'TEXT'}],
+        rows,
+      });
+      sLog(`補點: ${rows.length} 筆`);
+    }
+
     // ── Write GeoPackage ──────────────────────────────────────────────────────
     sProg(90, '輸出 GeoPackage…');
     const gpkgName = `${caseId}_${caseDate}.gpkg`;
@@ -1625,11 +1655,12 @@ async function runSurvey() {
     sLog(`已輸出 ${gpkgName}`);
 
     // ── 儲存全域供地號選擇器使用 ──────────────────────────────────────────────
-    _sCaseId  = caseId;
-    _sPtMain  = ptCoordsMain;
-    _sSub     = subCoords;
-    _sD20     = d20;
-    _sD2B     = d2b;
+    _sCaseId      = caseId;
+    _sSurveyDate  = caseDate;   // 放樣日期
+    _sPtMain      = ptCoordsMain;
+    _sSub         = subCoords;
+    _sD20         = d20;
+    _sD2B         = d2b;
 
     sProg(100, '完成！');
     document.getElementById('survey-result-section').hidden = false;
