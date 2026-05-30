@@ -240,8 +240,9 @@
 'use strict';
 
 // ── 版本 & 歷程 ──────────────────────────────────────────────────────────────
-const APP_VERSION = 'v1.4.0';
+const APP_VERSION = 'v1.5.0';
 const CHANGELOG = [
+  { ver: 'v1.5.0', date: '2026-05-10', note: '複丈資料分頁：讀取 D14/D21/D11（DBF），輸出界址點、補點、地籍圖線段為 GeoPackage，並自動更新 QGIS QGZ 專案' },
   { ver: 'v1.4.0', date: '2026-05-10', note: '圖幅號圖層（10碼目錄外包矩形）、宗地中文段名欄位、界址點預設不勾選、段名資料來源 api.nlsc.gov.tw' },
   { ver: 'v1.3.0', date: '2026-05-10', note: '界址點新增 PARCEL_NO 欄位（所屬地號反查）' },
   { ver: 'v1.2.0', date: '2026-05-07', note: 'KC 通霄所格式支援（圖解／數值路徑分類）、段代碼混合座標系統 top/sub、saveConfig 修正' },
