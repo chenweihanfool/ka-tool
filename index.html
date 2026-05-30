@@ -107,9 +107,10 @@
     <div class="card">
       <h2>步驟 2 — 輸出項目</h2>
       <div class="check-group">
-        <label><input type="checkbox" id="chk-pts" checked> 界址點.geojson</label>
+        <label><input type="checkbox" id="chk-pts"> 界址點.geojson</label>
         <label><input type="checkbox" id="chk-par" checked> 宗地.geojson</label>
         <label><input type="checkbox" id="chk-ctl" checked> 圖根點.geojson</label>
+        <label><input type="checkbox" id="chk-tile" checked> 圖幅號.geojson</label>
       </div>
     </div>
 
@@ -233,6 +234,47 @@ const DEFAULT_CS = {
   '0072':'twd67','0073':'twd67','0074':'twd67','0075':'twd67',
   '0076':'twd67','0099':'twd97',
 };
+
+// ── 段代碼 → 中文段名對應表（大湖地政事務所）──────────────────────────────────
+const SEG_NAMES = {
+  // 大湖鄉(15)
+  '0001':'大湖段','0002':'馬凱段','0003':'大埔段',
+  '0031':'大湖段','0032':'大湖段','0033':'大湖段',
+  '0034':'大湖段','0035':'大湖段','0036':'大湖段',
+  '0091':'大湖段','0092':'大湖段','0093':'大湖段',
+  '0096':'大湖段','0097':'大湖段','0098':'大湖段',
+  '0900':'大湖段','0901':'大湖段',
+  '0905':'大湖段','0906':'大湖段','0907':'大湖段',
+  '0908':'大湖段','0909':'大湖段','0910':'大湖段',
+  '0911':'大湖段','0912':'大湖段','0913':'大湖段','0914':'大湖段',
+  // 卓蘭鎮(16)
+  '0004':'卓蘭段','0005':'卓蘭段','0007':'卓蘭段','0008':'卓蘭段',
+  '0042':'卓蘭段','0043':'卓蘭段','0044':'卓蘭段','0045':'卓蘭段',
+  '0046':'卓蘭段','0047':'卓蘭段','0048':'卓蘭段',
+  '0077':'卓蘭段','0078':'卓蘭段','0079':'卓蘭段','0080':'卓蘭段',
+  '0081':'卓蘭段','0082':'卓蘭段','0083':'卓蘭段','0084':'卓蘭段',
+  '0085':'卓蘭段','0086':'卓蘭段','0087':'卓蘭段','0088':'卓蘭段',
+  '0089':'卓蘭段','0090':'卓蘭段','0094':'卓蘭段','0095':'卓蘭段',
+  // 獅潭鄉(17)
+  '0009':'獅潭段','0010':'獅潭段','0011':'獅潭段','0012':'獅潭段',
+  '0013':'獅潭段','0014':'獅潭段','0015':'獅潭段','0016':'獅潭段',
+  '0017':'獅潭段','0018':'獅潭段','0019':'獅潭段','0020':'獅潭段',
+  '0021':'獅潭段','0022':'獅潭段','0023':'獅潭段','0024':'獅潭段',
+  '0025':'獅潭段','0026':'獅潭段','0027':'獅潭段','0028':'獅潭段',
+  '0029':'獅潭段','0030':'獅潭段',
+  '0037':'獅潭段','0038':'獅潭段','0039':'獅潭段','0040':'獅潭段','0041':'獅潭段',
+  '0049':'獅潭段','0050':'獅潭段','0051':'獅潭段','0052':'獅潭段',
+  '0053':'獅潭段','0054':'獅潭段','0055':'獅潭段',
+  '0902':'獅潭段','0903':'獅潭段','0904':'獅潭段',
+  // 泰安鄉(18)
+  '0056':'泰安段','0057':'泰安段','0058':'泰安段','0059':'泰安段',
+  '0060':'泰安段','0061':'泰安段','0062':'泰安段','0063':'泰安段',
+  '0064':'泰安段','0065':'泰安段','0066':'泰安段','0067':'泰安段',
+  '0068':'泰安段','0069':'泰安段','0070':'泰安段','0071':'泰安段',
+  '0072':'泰安段','0073':'泰安段','0074':'泰安段','0075':'泰安段',
+  '0076':'泰安段','0099':'泰安段',
+};
+// ⚠ 上方段名尚未依圖片完整填入，請對照「大湖所段代碼表.jpg」補充正確段名後告知
 
 // Working config (merged from localStorage)
 let CS = {};
@@ -465,8 +507,8 @@ function sortParcelNos(set) {
 
 // ── Per-directory processing (KA and KC) ────────────────────────────────────
 async function processOneDir({ dir, prefix, crsType },
-                              doPts, doPar, doCtl,
-                              ptFeatures, parFeatures, ctlMap, errors) {
+                              doPts, doPar, doCtl, doTile,
+                              ptFeatures, parFeatures, ctlMap, tileFeatures, errors) {
   const found = await findSegCode(dir);
   if (!found) return;
   const segCode = found.segCode;
@@ -524,7 +566,8 @@ async function processOneDir({ dir, prefix, crsType },
         parFeatures.push({
           type: 'Feature',
           geometry: { type: 'Polygon', coordinates: [ring] },
-          properties: { SEG_CODE: segCode, SHEET: sheetId, MOTHER: m, CHILD: c,
+          properties: { SEG_CODE: segCode, SEG_NAME: SEG_NAMES[segCode] ?? '',
+                        SHEET: sheetId, MOTHER: m, CHILD: c,
                         PARCEL_NO: pno, AREA_M2: areas[key] ?? 0 },
         });
         builtCount++;
@@ -550,14 +593,36 @@ async function processOneDir({ dir, prefix, crsType },
       }
     }
   }
+
+  // ── 圖幅號 polygon (只針對 10 碼目錄：KA00010001 / KC03080004 形式) ──────────
+  if (doTile && /^[A-Z]{2}\d{8}$/i.test(dir.name)) {
+    const coords = Object.values(pts97);   // [[n97, e97], ...]
+    if (coords.length >= 2) {
+      const ns = coords.map(c => c[0]), es = coords.map(c => c[1]);
+      const [minN, maxN] = [Math.min(...ns), Math.max(...ns)];
+      const [minE, maxE] = [Math.min(...es), Math.max(...es)];
+      const ring = [[minE,minN],[maxE,minN],[maxE,maxN],[minE,maxN],[minE,minN]];
+      tileFeatures.push({
+        type: 'Feature',
+        geometry: { type: 'Polygon', coordinates: [ring] },
+        properties: {
+          SEG_CODE: segCode,
+          SEG_NAME: SEG_NAMES[segCode] ?? '',
+          SHEET:    sheetId,
+          圖幅號:   dir.name.slice(-2),   // 最後 2 碼
+        },
+      });
+    }
+  }
 }
 
 async function runProcess() {
   if (!baseHandle) return;
 
-  const doPts = document.getElementById('chk-pts').checked;
-  const doPar = document.getElementById('chk-par').checked;
-  const doCtl = document.getElementById('chk-ctl').checked;
+  const doPts  = document.getElementById('chk-pts').checked;
+  const doPar  = document.getElementById('chk-par').checked;
+  const doCtl  = document.getElementById('chk-ctl').checked;
+  const doTile = document.getElementById('chk-tile').checked;
 
   document.getElementById('progress-section').hidden = false;
   document.getElementById('result-section').hidden = true;
@@ -568,17 +633,18 @@ async function runProcess() {
   log(`格式: ${fmt === 'KC' ? 'KC 通霄所（路徑分類）' : 'KA 大湖所（段代碼表）'}`);
   log(`找到 ${list.length} 個資料夾，開始處理…`);
 
-  const ptFeatures  = [];
-  const parFeatures = [];
-  const ctlMap      = new Map();
-  const errors      = [];
+  const ptFeatures   = [];
+  const parFeatures  = [];
+  const ctlMap       = new Map();
+  const tileFeatures = [];
+  const errors       = [];
 
   for (let i = 0; i < list.length; i++) {
     if ((i + 1) % 10 === 0) {
       setProgress(Math.round((i + 1) / list.length * 95), `(${i+1}/${list.length}) ${list[i].dir.name}`);
       await yield_();
     }
-    await processOneDir(list[i], doPts, doPar, doCtl, ptFeatures, parFeatures, ctlMap, errors);
+    await processOneDir(list[i], doPts, doPar, doCtl, doTile, ptFeatures, parFeatures, ctlMap, tileFeatures, errors);
   }
 
   // Build CTL features
@@ -597,13 +663,15 @@ async function runProcess() {
   log(`界址點:  ${ptFeatures.length.toLocaleString()} 筆`);
   log(`宗地:    ${parFeatures.length.toLocaleString()} 筆`);
   log(`圖根點:  ${ctlFeatures.length.toLocaleString()} 筆`);
+  log(`圖幅號:  ${tileFeatures.length.toLocaleString()} 筆`);
   if (errors.length) log(`錯誤:    ${errors.length} 筆`);
 
   // Results UI
   const stats = [
-    { lbl: '界址點', val: doPts ? ptFeatures.length : null },
-    { lbl: '宗地',   val: doPar ? parFeatures.length : null },
-    { lbl: '圖根點', val: doCtl ? ctlFeatures.length : null },
+    { lbl: '界址點', val: doPts  ? ptFeatures.length   : null },
+    { lbl: '宗地',   val: doPar  ? parFeatures.length  : null },
+    { lbl: '圖根點', val: doCtl  ? ctlFeatures.length  : null },
+    { lbl: '圖幅號', val: doTile ? tileFeatures.length : null },
     { lbl: '錯誤',   val: errors.length, warn: errors.length > 0 },
   ];
   document.getElementById('result-stats').innerHTML = stats.map(s => `
@@ -615,9 +683,10 @@ async function runProcess() {
   const dlDiv = document.getElementById('dl-btns');
   dlDiv.innerHTML = '';
   const outputs = [
-    { flag: doPts, features: ptFeatures,  name: '界址點.geojson' },
-    { flag: doPar, features: parFeatures, name: '宗地.geojson'   },
-    { flag: doCtl, features: ctlFeatures, name: '圖根點.geojson' },
+    { flag: doPts,  features: ptFeatures,   name: '界址點.geojson' },
+    { flag: doPar,  features: parFeatures,  name: '宗地.geojson'   },
+    { flag: doCtl,  features: ctlFeatures,  name: '圖根點.geojson' },
+    { flag: doTile, features: tileFeatures, name: '圖幅號.geojson' },
   ];
   for (const o of outputs) {
     if (!o.flag) continue;
