@@ -169,6 +169,30 @@
       <div class="dl-group" id="survey-dl-btns"></div>
     </div>
 
+    <div class="card" id="survey-parcel-section" hidden>
+      <h2>輸出座標 TXT（上傳經緯儀／GPS）</h2>
+      <p style="font-size:12px;color:#888;margin-bottom:10px">
+        選擇地號，輸出該地號界址點及補點座標（格式：點號,北向,東向）
+      </p>
+      <div style="display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap">
+        <div style="flex:1;min-width:180px">
+          <input id="parcel-search" type="text" placeholder="🔍 地號搜尋…"
+            style="width:100%;padding:5px 8px;margin-bottom:5px;border:1px solid #d8dde8;border-radius:4px;font-size:13px"
+            oninput="filterParcelList(this.value)">
+          <select id="parcel-select" multiple
+            style="width:100%;height:130px;border:1px solid #d8dde8;border-radius:4px;font-size:13px"></select>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px;padding-top:28px">
+          <button onclick="document.getElementById('parcel-select').querySelectorAll('option').forEach(o=>o.selected=true)">全選</button>
+          <button onclick="document.getElementById('parcel-select').querySelectorAll('option').forEach(o=>o.selected=false)">清除</button>
+        </div>
+      </div>
+      <div style="margin-top:10px;font-size:12px;color:#666" id="parcel-sel-info"></div>
+      <div style="margin-top:8px">
+        <button class="primary" onclick="downloadCoordTxt()">⬇ 下載座標 TXT</button>
+      </div>
+    </div>
+
   </div><!-- /tab-survey -->
 
   <!-- ══ Tab: 段代碼設定 ══ -->
@@ -1187,7 +1211,105 @@ function newLayerId(name) {
 
 // ── 複丈 tab state ────────────────────────────────────────────────────────────
 let _surveyDir = null;
-let _qgzFile   = null;
+// 上次處理結果（供地號選擇器使用）
+// 術語：整數點=界址點(COT_REF=0), 小數點=參考點(COT_REF>0), Q開頭=補點(D20)
+let _sPtMain  = new Map();   // COT_NUMBER(str) → {x,y}  界址點
+let _sSub     = new Map();   // "N.M"(str)      → {x,y}  參考點
+let _sD20     = [];          // D20 records      補點(Q prefix)
+let _sD2B     = [];          // D2B records      宗地→界址點對照
+let _sCaseId  = '';
+
+// ── 地號選擇器 ────────────────────────────────────────────────────────────────
+// 從 D2B 建立地號清單（直接記錄宗地邊界點，比走 D21 拓撲更可靠）
+function populateParcelSelect(d2b) {
+  const sel = document.getElementById('parcel-select');
+  sel.innerHTML = '';
+  const seen = new Set();
+  for (const r of d2b) {
+    const sec = r.O_SECTION, m = r.O_PARCEL, c = r.O_PARCEL_E || '0';
+    if (!m || m === '0') continue;
+    const key = `${sec},${m},${c}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const cInt = parseInt(c) || 0;
+    const label = cInt > 0
+      ? `${parseInt(m)}-${cInt}（段${parseInt(sec)}）`
+      : `${parseInt(m)}（段${parseInt(sec)}）`;
+    sel.appendChild(new Option(label, key));
+  }
+  document.getElementById('survey-parcel-section').hidden = false;
+}
+
+function filterParcelList(q) {
+  q = q.trim().toLowerCase();
+  document.querySelectorAll('#parcel-select option').forEach(o => {
+    o.hidden = q ? !o.textContent.toLowerCase().includes(q) : false;
+  });
+}
+
+// 用 D2B 取得宗地的所有界址點 COT_NUMBER
+function getParcelPtIdsD2B(sec, m, c) {
+  const ids = new Set();
+  for (const r of _sD2B) {
+    if (parseInt(r.O_SECTION)===sec && parseInt(r.O_PARCEL)===m && parseInt(r.O_PARCEL_E||0)===c) {
+      for (let i = 1; i <= 8; i++) {
+        const v = r[`COORD_${i}`];
+        if (v && v !== '0') ids.add(v);
+      }
+    }
+  }
+  return ids;
+}
+
+function downloadCoordTxt() {
+  const sel  = document.getElementById('parcel-select');
+  const vals = [...sel.selectedOptions].map(o => o.value);
+  if (!vals.length) { alert('請先選擇地號'); return; }
+
+  // 1. 收集所有選定地號的界址點 ID（從 D2B）
+  const intPtIds = new Set();
+  for (const val of vals) {
+    const [sec, m, c] = val.split(',').map(Number);
+    for (const id of getParcelPtIdsD2B(sec, m, c)) intPtIds.add(id);
+  }
+
+  const lines = [];
+
+  // 2. 界址點（整數編碼）
+  const sortedInt = [...intPtIds].filter(id => _sPtMain.has(id)).sort((a,b)=>+a-+b);
+  for (const id of sortedInt) {
+    const p = _sPtMain.get(id);
+    lines.push(`${+id},${p.y.toFixed(3)},${p.x.toFixed(3)}`);
+  }
+
+  // 3. 参考點（小數點編碼：base COT_NUMBER 屬於所選地號的界址點）
+  const refLines = [];
+  for (const [key, p] of _sSub) {
+    const base = String(parseInt(key.split('.')[0]));
+    if (!intPtIds.has(base)) continue;
+    refLines.push({ key, sortKey: parseFloat(key), p });
+  }
+  refLines.sort((a,b) => a.sortKey - b.sortKey);
+  for (const { key, p } of refLines) {
+    lines.push(`${key},${p.y.toFixed(3)},${p.x.toFixed(3)}`);
+  }
+
+  // 4. 補點（D20 Q 開頭，全部輸出）
+  for (const r of _sD20) {
+    const y = parseFloat(r.CTL_Y), x = parseFloat(r.CTL_X);
+    if (!r.CTL_NAME || !isFinite(y) || !isFinite(x)) continue;
+    lines.push(`${r.CTL_NAME},${y.toFixed(3)},${x.toFixed(3)}`);
+  }
+
+  const info = `界址點 ${sortedInt.length} 點 ／ 參考點 ${refLines.length} 點 ／ 補點 ${_sD20.length} 點`;
+  document.getElementById('parcel-sel-info').textContent = info;
+
+  if (!lines.length) { alert('所選地號無座標資料'); return; }
+  triggerDownload(
+    new Blob([lines.join('\r\n')], { type: 'text/plain;charset=utf-8' }),
+    `${_sCaseId}_座標.txt`
+  );
+}
 
 async function pickSurveyDir() {
   try {
@@ -1293,7 +1415,9 @@ async function runSurvey() {
     const d21 = await readDBFopt(`${baseName}.D21`);
     const d29 = await readDBFopt(`${baseName}.D29`);
     const d11 = await readDBFopt(`${baseName}.D11`);
-    sLog(`D21: ${d21.length} 筆  D29: ${d29.length} 筆  D11: ${d11.length} 筆`);
+    const d20 = await readDBFopt(`${baseName}.D20`); // 補點（Q 開頭）
+    const d2b = await readDBFopt(`${baseName}.D2B`); // 宗地→界址點對照
+    sLog(`D21: ${d21.length}筆  D29: ${d29.length}筆  D11: ${d11.length}筆  D20: ${d20.length}筆  D2B: ${d2b.length}筆`);
 
     // ── Build layers ──────────────────────────────────────────────────────────
     sProg(65, '建立圖層…');
@@ -1436,8 +1560,16 @@ async function runSurvey() {
     await buildAndDownloadGPKG(gpkgName, layerDefs);
     sLog(`已輸出 ${gpkgName}`);
 
+    // ── 儲存全域供地號選擇器使用 ──────────────────────────────────────────────
+    _sCaseId  = caseId;
+    _sPtMain  = ptCoordsMain;
+    _sSub     = subCoords;
+    _sD20     = d20;
+    _sD2B     = d2b;
+
     sProg(100, '完成！');
     document.getElementById('survey-result-section').hidden = false;
+    populateParcelSelect(d2b.length ? d2b : []);
 
   } catch(e) {
     sLog(`❌ 錯誤: ${e.message}`);
