@@ -1225,7 +1225,8 @@ let _surveyDir = null;
 let _sPtMain      = new Map();   // COT_NUMBER(str) → {x,y}  界址點
 let _sSub         = new Map();   // "N.M"(str)      → {x,y}  參考點
 let _sD20         = [];          // D20 records      補點(Q prefix)
-let _sD2B         = [];          // D2B records      宗地→界址點對照
+let _sD2B         = [];          // D2B records      宗地清單用（地號下拉選單）
+let _sd21         = [];          // D21 records      界址點查找（跨圖幅權威來源）
 let _sCaseId      = '';
 let _sSurveyDate  = '';          // 放樣日期（使用者輸入）
 
@@ -1257,15 +1258,17 @@ function filterParcelList(q) {
   });
 }
 
-// 用 D2B 取得宗地的所有界址點 COT_NUMBER
-function getParcelPtIdsD2B(sec, m, c) {
+// 用 D21 拓撲取得宗地所有界址點（跨圖幅正確，D2B 僅用於清單）
+// D21 的 L/R_PARCEL 不分圖幅，是案件內最完整的來源
+function getParcelPtIds(sec, m, c) {
   const ids = new Set();
-  for (const r of _sD2B) {
-    if (parseInt(r.O_SECTION)===sec && parseInt(r.O_PARCEL)===m && parseInt(r.O_PARCEL_E||0)===c) {
-      for (let i = 1; i <= 8; i++) {
-        const v = r[`COORD_${i}`];
-        if (v && v !== '0') ids.add(v);
-      }
+  for (const r of _sd21) {
+    const lm = parseInt(r.L_SECTION)===sec && parseInt(r.L_PARCEL)===m && parseInt(r.L_PARCEL_E||0)===c;
+    const rm = parseInt(r.R_SECTION)===sec && parseInt(r.R_PARCEL)===m && parseInt(r.R_PARCEL_E||0)===c;
+    if (lm || rm) {
+      if (r.LIN_TOP && r.LIN_TOP !== '0') ids.add(r.LIN_TOP);
+      if (r.LIN_BOT && r.LIN_BOT !== '0') ids.add(r.LIN_BOT);
+      if (r.LIN_MID && r.LIN_MID !== '0') ids.add(r.LIN_MID);
     }
   }
   return ids;
@@ -1280,7 +1283,7 @@ function downloadCoordTxt() {
   const intPtIds = new Set();
   for (const val of vals) {
     const [sec, m, c] = val.split(',').map(Number);
-    for (const id of getParcelPtIdsD2B(sec, m, c)) intPtIds.add(id);
+    for (const id of getParcelPtIds(sec, m, c)) intPtIds.add(id);
   }
 
   const lines = [];
@@ -1323,7 +1326,7 @@ function downloadCoordTxt() {
 
 // ── 宗地形心計算（D2B 邊界點平均）────────────────────────────────────────────
 function calcParcelCentroid(sec, m, c) {
-  const ids = getParcelPtIdsD2B(sec, m, c);
+  const ids = getParcelPtIds(sec, m, c);   // D21 跨圖幅
   let sumX = 0, sumY = 0, count = 0;
   for (const id of ids) {
     const p = _sPtMain.get(id);
@@ -1656,11 +1659,12 @@ async function runSurvey() {
 
     // ── 儲存全域供地號選擇器使用 ──────────────────────────────────────────────
     _sCaseId      = caseId;
-    _sSurveyDate  = caseDate;   // 放樣日期
+    _sSurveyDate  = caseDate;
     _sPtMain      = ptCoordsMain;
     _sSub         = subCoords;
     _sD20         = d20;
     _sD2B         = d2b;
+    _sd21         = d21;         // D21 拓撲（跨圖幅界址點查找）
 
     sProg(100, '完成！');
     document.getElementById('survey-result-section').hidden = false;
