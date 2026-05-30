@@ -81,7 +81,7 @@
 <div id="app">
 
   <header>
-    <h1>地籍圖整合工具</h1>
+    <h1>地籍圖整合工具 <span id="ver-badge" style="font-size:13px;font-weight:400;color:#888;margin-left:6px"></span></h1>
     <p>大湖地政事務所 · COA / BNP / PAR / CTL → GeoJSON (EPSG:3826 TWD97)</p>
   </header>
 
@@ -176,8 +176,14 @@
         <li>需要 <strong>Chrome 或 Edge</strong>（File System Access API）</li>
         <li>需要網路連線（proj4.js CDN）</li>
       </ul>
-      <h3>版本</h3>
-      <p>v1.0.0 · 2026-05-06 · <a href="https://github.com/" target="_blank">GitHub</a></p>
+      <h3>版本歷程</h3>
+      <table style="font-size:12px;margin-top:4px">
+        <thead><tr><th>版本</th><th>日期</th><th>更新內容</th></tr></thead>
+        <tbody id="changelog-tbody"></tbody>
+      </table>
+      <p style="margin-top:8px;font-size:12px">
+        <a href="https://github.com/chenweihanfool/ka-tool" target="_blank">GitHub</a>
+      </p>
     </div>
   </div><!-- /tab-about -->
 
@@ -185,6 +191,16 @@
 
 <script>
 'use strict';
+
+// ── 版本 & 歷程 ──────────────────────────────────────────────────────────────
+const APP_VERSION = 'v1.4.0';
+const CHANGELOG = [
+  { ver: 'v1.4.0', date: '2026-05-10', note: '圖幅號圖層（10碼目錄外包矩形）、宗地中文段名欄位、界址點預設不勾選、段名資料來源 api.nlsc.gov.tw' },
+  { ver: 'v1.3.0', date: '2026-05-10', note: '界址點新增 PARCEL_NO 欄位（所屬地號反查）' },
+  { ver: 'v1.2.0', date: '2026-05-07', note: 'KC 通霄所格式支援（圖解／數值路徑分類）、段代碼混合座標系統 top/sub、saveConfig 修正' },
+  { ver: 'v1.1.0', date: '2026-05-06', note: '圖根點.geojson 輸出、相同座標跨段合併、新增段代碼設定頁面' },
+  { ver: 'v1.0.0', date: '2026-05-06', note: '初始版本：大湖所 KA 格式，界址點 / 宗地 / 圖根點 GeoJSON 輸出（EPSG:3826）' },
+];
 
 // ── Projection setup ────────────────────────────────────────────────────────
 proj4.defs('EPSG:3828',
@@ -834,6 +850,21 @@ function switchTab(btn, name) {
 // ── Init ─────────────────────────────────────────────────────────────────────
 loadConfig();
 renderConfigTable();
+
+// 版本徽章
+document.getElementById('ver-badge').textContent = APP_VERSION;
+
+// Changelog 表格
+(function() {
+  const tb = document.getElementById('changelog-tbody');
+  if (!tb) return;
+  tb.innerHTML = CHANGELOG.map((c, i) => `
+    <tr style="${i===0?'font-weight:600':''}">
+      <td><span class="badge${i===0?' ':'  warn'}">${c.ver}</span></td>
+      <td style="white-space:nowrap;color:#666">${c.date}</td>
+      <td>${c.note}</td>
+    </tr>`).join('');
+})();
 </script>
 </body>
 </html>
