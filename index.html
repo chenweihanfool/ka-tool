@@ -1041,7 +1041,7 @@ async function buildAndDownloadGPKG(filename, layerDefs) {
      'PROJCS["TWD97 / TM2 zone 121",GEOGCS["TWD97",DATUM["Taiwan_Datum_1997",SPHEROID["GRS 1980",6378137,298.257222101]],PRIMEM["Greenwich",0],UNIT["degree",0.017453292519943278]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",121],PARAMETER["scale_factor",0.9999],PARAMETER["false_easting",250000],PARAMETER["false_northing",0],UNIT["metre",1]]',
      'TWD97/TM2')`);
   db.run(`INSERT INTO gpkg_spatial_ref_sys VALUES
-    ('Undefined cartesian',−1,'NONE',−1,'undefined','undefined')`);
+    ('Undefined cartesian',-1,'NONE',-1,'undefined','undefined')`);
 
   db.run(`CREATE TABLE gpkg_contents (
     table_name TEXT NOT NULL PRIMARY KEY, data_type TEXT NOT NULL,
