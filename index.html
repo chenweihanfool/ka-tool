@@ -188,8 +188,9 @@
         </div>
       </div>
       <div style="margin-top:10px;font-size:12px;color:#666" id="parcel-sel-info"></div>
-      <div style="margin-top:8px">
-        <button class="primary" onclick="downloadCoordTxt()">⬇ 下載座標 TXT</button>
+      <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="primary" onclick="downloadCoordTxt()">⬇ 座標 TXT（經緯儀/GPS）</button>
+        <button onclick="downloadGoogleKML()">📍 下載 KML（Google My Maps）</button>
       </div>
     </div>
 
@@ -1308,6 +1309,69 @@ function downloadCoordTxt() {
   triggerDownload(
     new Blob([lines.join('\r\n')], { type: 'text/plain;charset=utf-8' }),
     `${_sCaseId}_座標.txt`
+  );
+}
+
+// ── 宗地形心計算（D2B 邊界點平均）────────────────────────────────────────────
+function calcParcelCentroid(sec, m, c) {
+  const ids = getParcelPtIdsD2B(sec, m, c);
+  let sumX = 0, sumY = 0, count = 0;
+  for (const id of ids) {
+    const p = _sPtMain.get(id);
+    if (!p) continue;
+    sumX += p.x; sumY += p.y; count++;
+  }
+  return count ? { x: sumX / count, y: sumY / count } : null; // TWD97 {x=E, y=N}
+}
+
+// ── 輸出 Google My Maps KML ───────────────────────────────────────────────────
+function downloadGoogleKML() {
+  const sel  = document.getElementById('parcel-select');
+  const vals = [...sel.selectedOptions].map(o => o.value);
+  if (!vals.length) { alert('請先選擇地號'); return; }
+
+  // KML 清單名稱 = 日期（從案號解析，或今天）
+  const today = new Date().toLocaleDateString('zh-TW',{year:'numeric',month:'2-digit',day:'2-digit'}).replace(/\//g,'-');
+  const docName = `${today} ${_sCaseId}`;
+
+  const marks = [];
+  let skipped = 0;
+  for (const val of vals) {
+    const [sec, m, c] = val.split(',').map(Number);
+    const ct = calcParcelCentroid(sec, m, c);
+    if (!ct) { skipped++; continue; }
+
+    // TWD97 (EPSG:3826) → WGS84 (EPSG:4326)
+    const [lon, lat] = proj4('EPSG:3826', 'EPSG:4326', [ct.x, ct.y]);
+    if (!isFinite(lon) || !isFinite(lat)) { skipped++; continue; }
+
+    const label = c > 0 ? `${m}-${c}` : String(m);
+    const desc  = `地段${sec}，地號${label}`;
+    marks.push(
+      `  <Placemark>\n` +
+      `    <name>${label}</name>\n` +
+      `    <description>${desc}</description>\n` +
+      `    <Point><coordinates>${lon.toFixed(7)},${lat.toFixed(7)},0</coordinates></Point>\n` +
+      `  </Placemark>`
+    );
+  }
+
+  if (!marks.length) { alert('所選地號無法計算形心（D2B 無邊界點資料）'); return; }
+
+  const kml =
+    `<?xml version="1.0" encoding="UTF-8"?>\n` +
+    `<kml xmlns="http://www.opengis.net/kml/2.2">\n` +
+    `<Document>\n` +
+    `  <name>${docName}</name>\n` +
+    marks.join('\n') + '\n' +
+    `</Document>\n` +
+    `</kml>`;
+
+  if (skipped) sLog(`⚠ ${skipped} 個地號無法計算形心，已略過`);
+
+  triggerDownload(
+    new Blob([kml], { type: 'application/vnd.google-earth.kml+xml' }),
+    `${_sCaseId}_GoogleMaps.kml`
   );
 }
 
