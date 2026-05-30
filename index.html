@@ -82,7 +82,7 @@
 
   <header>
     <h1>地籍圖整合工具 <span id="ver-badge" style="font-size:13px;font-weight:400;color:#888;margin-left:6px"></span></h1>
-    <p>大湖地政事務所 · COA / BNP / PAR / CTL → GeoJSON (EPSG:3826 TWD97)</p>
+    <p>大湖地政事務所 · COA / BNP / PAR / CTL → GeoPackage (EPSG:3826 TWD97)</p>
   </header>
 
   <!-- ── Tabs ── -->
@@ -108,10 +108,10 @@
     <div class="card">
       <h2>步驟 2 — 輸出項目</h2>
       <div class="check-group">
-        <label><input type="checkbox" id="chk-pts"> 界址點.geojson</label>
-        <label><input type="checkbox" id="chk-par" checked> 宗地.geojson</label>
-        <label><input type="checkbox" id="chk-ctl" checked> 圖根點.geojson</label>
-        <label><input type="checkbox" id="chk-tile" checked> 圖幅號.geojson</label>
+        <label><input type="checkbox" id="chk-pts"> 界址點</label>
+        <label><input type="checkbox" id="chk-par" checked> 宗地</label>
+        <label><input type="checkbox" id="chk-ctl" checked> 圖根點</label>
+        <label><input type="checkbox" id="chk-tile" checked> 圖幅號</label>
       </div>
     </div>
 
@@ -240,8 +240,9 @@
 'use strict';
 
 // ── 版本 & 歷程 ──────────────────────────────────────────────────────────────
-const APP_VERSION = 'v1.5.0';
+const APP_VERSION = 'v1.5.1';
 const CHANGELOG = [
+  { ver: 'v1.5.1', date: '2026-05-10', note: '主處理輸出格式改為 GeoPackage（地籍_YYYYMMDD.gpkg），單檔包含所有勾選圖層' },
   { ver: 'v1.5.0', date: '2026-05-10', note: '複丈資料分頁：讀取 D14/D21/D11（DBF），輸出界址點、補點、地籍圖線段為 GeoPackage，並自動更新 QGIS QGZ 專案' },
   { ver: 'v1.4.0', date: '2026-05-10', note: '圖幅號圖層（10碼目錄外包矩形）、宗地中文段名欄位、界址點預設不勾選、段名資料來源 api.nlsc.gov.tw' },
   { ver: 'v1.3.0', date: '2026-05-10', note: '界址點新增 PARCEL_NO 欄位（所屬地號反查）' },
@@ -745,23 +746,83 @@ async function runProcess() {
 
   const dlDiv = document.getElementById('dl-btns');
   dlDiv.innerHTML = '';
-  const outputs = [
-    { flag: doPts,  features: ptFeatures,   name: '界址點.geojson' },
-    { flag: doPar,  features: parFeatures,  name: '宗地.geojson'   },
-    { flag: doCtl,  features: ctlFeatures,  name: '圖根點.geojson' },
-    { flag: doTile, features: tileFeatures, name: '圖幅號.geojson' },
-  ];
-  for (const o of outputs) {
-    if (!o.flag) continue;
-    const btn = document.createElement('button');
-    btn.textContent = `⬇ ${o.name} (${o.features.length.toLocaleString()} 筆)`;
-    btn.onclick = () => downloadGeoJSON(null, o.name, o.features);
-    // store features on button to avoid closure issues
-    btn.dataset.name = o.name;
-    btn._features = o.features;
-    btn.onclick = () => downloadGeoJSON({ features: btn._features }, btn.dataset.name);
-    dlDiv.appendChild(btn);
-  }
+
+  // ── GeoPackage download button (built lazily on click) ───────────────────
+  const totalPts = (doPts?ptFeatures.length:0) + (doPar?parFeatures.length:0)
+                 + (doCtl?ctlFeatures.length:0) + (doTile?tileFeatures.length:0);
+  const gpkgBtn = document.createElement('button');
+  gpkgBtn.className = 'primary';
+  gpkgBtn.textContent = `⬇ 地籍.gpkg (${totalPts.toLocaleString()} 筆)`;
+  gpkgBtn.onclick = async () => {
+    gpkgBtn.disabled = true;
+    gpkgBtn.textContent = '建立 GeoPackage… (載入 sql.js)';
+    try {
+      const layerDefs = [];
+
+      if (doPts && ptFeatures.length) layerDefs.push({
+        name: '界址點', geomType: 'POINT',
+        attrs: [{name:'SEG_CODE',type:'TEXT'},{name:'SHEET',type:'TEXT'},
+                {name:'POINT_ID',type:'TEXT'},{name:'N_TWD97',type:'REAL'},
+                {name:'E_TWD97',type:'REAL'},{name:'PARCEL_NO',type:'TEXT'}],
+        rows: ptFeatures.map(f => ({
+          geom: wkbPoint(f.geometry.coordinates[0], f.geometry.coordinates[1]),
+          SEG_CODE: f.properties.SEG_CODE, SHEET: f.properties.SHEET,
+          POINT_ID: f.properties.POINT_ID,
+          N_TWD97: f.properties.N_TWD97, E_TWD97: f.properties.E_TWD97,
+          PARCEL_NO: f.properties.PARCEL_NO,
+        })),
+      });
+
+      if (doPar && parFeatures.length) layerDefs.push({
+        name: '宗地', geomType: 'POLYGON',
+        attrs: [{name:'SEG_CODE',type:'TEXT'},{name:'SEG_NAME',type:'TEXT'},
+                {name:'SHEET',type:'TEXT'},{name:'MOTHER',type:'INTEGER'},
+                {name:'CHILD',type:'INTEGER'},{name:'PARCEL_NO',type:'TEXT'},
+                {name:'AREA_M2',type:'REAL'}],
+        rows: parFeatures.map(f => ({
+          geom: wkbPolygonFromRing(f.geometry.coordinates[0]),
+          SEG_CODE: f.properties.SEG_CODE, SEG_NAME: f.properties.SEG_NAME,
+          SHEET: f.properties.SHEET, MOTHER: f.properties.MOTHER,
+          CHILD: f.properties.CHILD, PARCEL_NO: f.properties.PARCEL_NO,
+          AREA_M2: f.properties.AREA_M2,
+        })),
+      });
+
+      if (doCtl && ctlFeatures.length) layerDefs.push({
+        name: '圖根點', geomType: 'POINT',
+        attrs: [{name:'SEG_CODE',type:'TEXT'},{name:'PT_NAME',type:'TEXT'},
+                {name:'N_TWD97',type:'REAL'},{name:'E_TWD97',type:'REAL'},
+                {name:'CRS',type:'TEXT'}],
+        rows: ctlFeatures.map(f => ({
+          geom: wkbPoint(f.geometry.coordinates[0], f.geometry.coordinates[1]),
+          SEG_CODE: f.properties.SEG_CODE, PT_NAME: f.properties.PT_NAME,
+          N_TWD97: f.properties.N_TWD97, E_TWD97: f.properties.E_TWD97,
+          CRS: f.properties.CRS,
+        })),
+      });
+
+      if (doTile && tileFeatures.length) layerDefs.push({
+        name: '圖幅號', geomType: 'POLYGON',
+        attrs: [{name:'SEG_CODE',type:'TEXT'},{name:'SEG_NAME',type:'TEXT'},
+                {name:'圖幅號',type:'TEXT'}],
+        rows: tileFeatures.map(f => ({
+          geom: wkbPolygonFromRing(f.geometry.coordinates[0]),
+          SEG_CODE: f.properties.SEG_CODE, SEG_NAME: f.properties.SEG_NAME,
+          '圖幅號': f.properties['圖幅號'],
+        })),
+      });
+
+      const date = new Date().toISOString().slice(0,10).replace(/-/g,'');
+      await buildAndDownloadGPKG(`地籍_${date}.gpkg`, layerDefs);
+      gpkgBtn.textContent = `⬇ 地籍.gpkg (${totalPts.toLocaleString()} 筆)`;
+    } catch(e) {
+      gpkgBtn.textContent = `❌ ${e.message}`;
+      console.error(e);
+    }
+    gpkgBtn.disabled = false;
+  };
+  dlDiv.appendChild(gpkgBtn);
+
   if (errors.length) {
     const btn = document.createElement('button');
     btn.textContent = `⚠ errors.txt (${errors.length} 筆)`;
