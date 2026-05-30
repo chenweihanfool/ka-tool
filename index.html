@@ -145,20 +145,12 @@
     </div>
 
     <div class="card">
-      <h2>步驟 2 — 選擇 QGIS 專案（可選）</h2>
-      <p style="font-size:12px;color:#888;margin-bottom:8px">選擇現有 .qgz 專案，系統將自動在「複丈歷史」群組下新增圖層</p>
-      <div class="step-row">
-        <button onclick="pickQGZFile()">📋 選擇 .qgz 專案…</button>
-        <span id="lblQGZ" style="color:#888">尚未選擇</span>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>步驟 3 — 輸出項目</h2>
+      <h2>步驟 2 — 輸出項目</h2>
       <div class="check-group">
-        <label><input type="checkbox" id="surv-chk-pts" checked> 界址點（D14 COT_REF=0）</label>
-        <label><input type="checkbox" id="surv-chk-sub" checked> 補點（D14 COT_REF≠0）</label>
+        <label><input type="checkbox" id="surv-chk-pts" checked> 界址點（D14）</label>
+        <label><input type="checkbox" id="surv-chk-sub" checked> 参考點（D14 小數編碼）</label>
         <label><input type="checkbox" id="surv-chk-cad" checked> 地籍圖線段（D21）</label>
+        <label><input type="checkbox" id="surv-chk-ref" checked> 参考線（D29）</label>
       </div>
     </div>
 
@@ -1235,6 +1227,7 @@ async function runSurvey() {
   const doPts = document.getElementById('surv-chk-pts').checked;
   const doSub = document.getElementById('surv-chk-sub').checked;
   const doCad = document.getElementById('surv-chk-cad').checked;
+  const doRef = document.getElementById('surv-chk-ref').checked;
 
   try {
     sProg(5, '掃描資料夾…');
@@ -1269,47 +1262,38 @@ async function runSurvey() {
     const { records: d14 } = await readDBF(d14h);
     sLog(`D14: ${d14.length} 筆`);
 
-    // Build coordinate lookup: COT_NUMBER → {x,y} (using first match for each number)
-    const coordMap = new Map();
+    // ptCoordsMain: 主點 (COT_REF=0) → D21 LIN_TOP/BOT lookup key is integer string
+    const ptCoordsMain = new Map();
     for (const r of d14) {
-      const key = `${r.COT_NUMBER}_${r.COT_REF||'0'}`;
+      if (r.COT_REF !== '0') continue;
       const x = parseFloat(r.COT_X), y = parseFloat(r.COT_Y);
-      if (isFinite(x) && isFinite(y)) coordMap.set(r.COT_NUMBER, {x,y}); // COT_REF=0 points only overwrite later
+      if (isFinite(x) && isFinite(y)) ptCoordsMain.set(r.COT_NUMBER, {x,y});
     }
-    // Rebuild with only COT_REF=0 as primary coords
-    const ptCoords = new Map();
+    // subCoords: 参考點 (COT_REF>0) → D29 LIN_TOP/BOT lookup key is "N.M" string
+    const subCoords = new Map();
     for (const r of d14) {
-      if (r.COT_REF === '0') {
-        const x = parseFloat(r.COT_X), y = parseFloat(r.COT_Y);
-        if (isFinite(x) && isFinite(y)) ptCoords.set(r.COT_NUMBER, {x,y});
-      }
-    }
-    // also include sub-points for line building
-    const allCoords = new Map();
-    for (const r of d14) {
+      if (r.COT_REF === '0' || r.COT_REF === '') continue;
       const x = parseFloat(r.COT_X), y = parseFloat(r.COT_Y);
-      if (isFinite(x) && isFinite(y)) allCoords.set(r.COT_NUMBER, {x,y});
+      if (!isFinite(x) || !isFinite(y)) continue;
+      // D29 stores as e.g. "90.7" (no leading zero), match by stripped ints
+      const key = `${parseInt(r.COT_NUMBER)}.${parseInt(r.COT_REF)}`;
+      subCoords.set(key, {x,y});
+      // also store padded version if COT_REF looks like "07"
+      subCoords.set(`${r.COT_NUMBER.trim()}.${r.COT_REF.trim()}`, {x,y});
     }
 
-    // ── Read D21 ──────────────────────────────────────────────────────────────
-    sProg(35, '讀取 D21…');
-    let d21 = [];
-    const d21h = await _surveyDir.getFileHandle(`${baseName}.D21`).catch(()=>null);
-    if (d21h) {
-      const { records } = await readDBF(d21h);
-      d21 = records;
-      sLog(`D21: ${d21.length} 筆`);
-    }
-
-    // ── Read D11 ──────────────────────────────────────────────────────────────
-    sProg(50, '讀取 D11…');
-    let d11 = [];
-    const d11h = await _surveyDir.getFileHandle(`${baseName}.D11`).catch(()=>null);
-    if (d11h) {
-      const { records } = await readDBF(d11h);
-      d11 = records;
-      sLog(`D11: ${d11.length} 筆`);
-    }
+    // ── Read D21, D29, D11 ────────────────────────────────────────────────────
+    sProg(35, '讀取 D21/D29/D11…');
+    const readDBFopt = async (name) => {
+      const h = await _surveyDir.getFileHandle(name).catch(()=>null);
+      if (!h) return [];
+      const { records } = await readDBF(h);
+      return records;
+    };
+    const d21 = await readDBFopt(`${baseName}.D21`);
+    const d29 = await readDBFopt(`${baseName}.D29`);
+    const d11 = await readDBFopt(`${baseName}.D11`);
+    sLog(`D21: ${d21.length} 筆  D29: ${d29.length} 筆  D11: ${d11.length} 筆`);
 
     // ── Build layers ──────────────────────────────────────────────────────────
     sProg(65, '建立圖層…');
@@ -1346,7 +1330,7 @@ async function runSurvey() {
       sLog(`界址點: ${rows.length} 筆`);
     }
 
-    // 2. 補點 (D14, COT_REF≠0)
+    // 2. 参考點 (D14, COT_REF≠0，小數點編碼)
     if (doSub) {
       const rows = d14
         .filter(r => r.COT_REF !== '0' && r.COT_REF !== '')
@@ -1356,47 +1340,45 @@ async function runSurvey() {
           return {
             geom: wkbPoint(x, y),
             COT_NUMBER: r.COT_NUMBER,
-            COT_REF: r.COT_REF,
-            PT_ID: `${r.COT_NUMBER}.${r.COT_REF}`,
+            COT_REF:    r.COT_REF,
+            PT_ID:      `${parseInt(r.COT_NUMBER)}.${parseInt(r.COT_REF)}`,
             COT_Y: y, COT_X: x,
             COT_SOURCE: r.COT_SOURCE,
           };
         }).filter(Boolean);
       layerDefs.push({
-        name: '補點',
-        geomType: 'POINT',
+        name: '参考點', geomType: 'POINT',
         attrs: [
-          {name:'COT_NUMBER',type:'INTEGER'},
-          {name:'COT_REF',type:'INTEGER'},
+          {name:'COT_NUMBER',type:'INTEGER'},{name:'COT_REF',type:'INTEGER'},
           {name:'PT_ID',type:'TEXT'},
           {name:'COT_Y',type:'REAL'},{name:'COT_X',type:'REAL'},
           {name:'COT_SOURCE',type:'INTEGER'},
         ],
         rows,
       });
-      sLog(`補點: ${rows.length} 筆`);
+      sLog(`参考點: ${rows.length} 筆`);
     }
 
-    // 3. 地籍圖 (D21 line segments, grouped by non-zero section)
+    // 3. 地籍圖 (D21 線段) —— 用 ptCoordsMain (COT_REF=0) 查詢，避免副點覆蓋
     if (doCad && d21.length > 0) {
-      // Collect distinct non-zero sections
       const sections = new Set();
       for (const r of d21) {
         if (r.L_SECTION && r.L_SECTION !== '0') sections.add(r.L_SECTION);
         if (r.R_SECTION && r.R_SECTION !== '0') sections.add(r.R_SECTION);
       }
-      const secList = [...sections].sort((a,b)=>+a-+b);
-
-      for (const sec of secList) {
+      for (const sec of [...sections].sort((a,b)=>+a-+b)) {
         const rows = [];
         for (const r of d21) {
           if (r.L_SECTION !== sec && r.R_SECTION !== sec) continue;
-          const top = allCoords.get(r.LIN_TOP);
-          const bot = allCoords.get(r.LIN_BOT);
+          const top = ptCoordsMain.get(r.LIN_TOP);
+          const bot = ptCoordsMain.get(r.LIN_BOT);
           if (!top || !bot) continue;
-          const pts = r.LIN_MID && r.LIN_MID !== '0'
-            ? [top, allCoords.get(r.LIN_MID), bot].filter(Boolean)
-            : [top, bot];
+          // LIN_MID: 若有中間點，可能是副點
+          let pts = [top, bot];
+          if (r.LIN_MID && r.LIN_MID !== '0') {
+            const mid = ptCoordsMain.get(r.LIN_MID) || subCoords.get(r.LIN_MID);
+            if (mid) pts = [top, mid, bot];
+          }
           rows.push({
             geom: wkbLineFromPts(pts.map(p=>[p.x,p.y])),
             L_SEC: r.L_SECTION, L_PAR: r.L_PARCEL,
@@ -1404,9 +1386,9 @@ async function runSurvey() {
             LIN_MODE: r.LIN_MODE,
           });
         }
-        const layerName = `地籍圖_S${sec.padStart(4,'0')}`;
+        const lname = `地籍圖_S${sec.padStart(4,'0')}`;
         layerDefs.push({
-          name: layerName, geomType: 'LINESTRING',
+          name: lname, geomType: 'LINESTRING',
           attrs: [
             {name:'L_SEC',type:'INTEGER'},{name:'L_PAR',type:'INTEGER'},
             {name:'R_SEC',type:'INTEGER'},{name:'R_PAR',type:'INTEGER'},
@@ -1414,65 +1396,47 @@ async function runSurvey() {
           ],
           rows,
         });
-        sLog(`${layerName}: ${rows.length} 筆線段`);
+        sLog(`${lname}: ${rows.length} 筆`);
       }
     }
 
+    // 4. 参考線 (D29) —— LIN_TOP/BOT 是 "N.M" 字串，對應 subCoords
+    if (doRef && d29.length > 0) {
+      const rows = [];
+      for (const r of d29) {
+        const topKey = r.LIN_TOP.trim();
+        const botKey = r.LIN_BOT.trim();
+        const top = subCoords.get(topKey) || ptCoordsMain.get(topKey);
+        const bot = subCoords.get(botKey) || ptCoordsMain.get(botKey);
+        if (!top || !bot) continue;
+        let pts = [top, bot];
+        if (r.LIN_MID && r.LIN_MID.trim() && r.LIN_MID.trim() !== '0') {
+          const midKey = r.LIN_MID.trim();
+          const mid = subCoords.get(midKey) || ptCoordsMain.get(midKey);
+          if (mid) pts = [top, mid, bot];
+        }
+        rows.push({
+          geom:     wkbLineFromPts(pts.map(p=>[p.x,p.y])),
+          L_TOP:    topKey,
+          L_BOT:    botKey,
+          LIN_MODE: r.LIN_MODE,
+        });
+      }
+      layerDefs.push({
+        name: '参考線', geomType: 'LINESTRING',
+        attrs: [{name:'L_TOP',type:'TEXT'},{name:'L_BOT',type:'TEXT'},{name:'LIN_MODE',type:'INTEGER'}],
+        rows,
+      });
+      sLog(`参考線: ${rows.length} 筆`);
+    }
+
     // ── Write GeoPackage ──────────────────────────────────────────────────────
-    sProg(80, '輸出 GeoPackage…');
+    sProg(90, '輸出 GeoPackage…');
     const gpkgName = `${caseId}_${caseDate}.gpkg`;
     await buildAndDownloadGPKG(gpkgName, layerDefs);
     sLog(`已輸出 ${gpkgName}`);
 
-    // ── Update QGZ if provided ────────────────────────────────────────────────
-    let qgzBlob = null;
-    if (_qgzFile) {
-      sProg(90, '更新 QGZ 專案…');
-      try {
-        const ab = await (await _qgzFile.getFile()).arrayBuffer();
-        const isGz = new Uint8Array(ab,0,2)[0]===0x1f && new Uint8Array(ab,0,2)[1]===0x8b;
-        const xmlStr = isGz ? await decompressGzip(ab)
-                             : new TextDecoder('utf-8').decode(ab);
-
-        // Layer specs for QGZ
-        const qgzLayers = layerDefs
-          .filter(l => l.rows && l.rows.length > 0)
-          .map(l => ({
-            id:       newLayerId(l.name),
-            name:     l.name,
-            geomType: l.geomType,
-            tableName:l.name,
-          }));
-
-        const groupLabel = `${caseDate} ${caseId}`;
-        const gpkgRel = `./${gpkgName}`; // relative path (same folder as QGZ)
-        const patchedXml = patchQGS(xmlStr, groupLabel, qgzLayers, gpkgRel);
-        const outBuf = isGz ? await compressGzip(patchedXml)
-                             : new TextEncoder().encode(patchedXml);
-        const ext = _qgzFile.name.endsWith('.qgs') ? '.qgs' : '.qgz';
-        qgzBlob = { buf: outBuf, name: `${caseId}_${caseDate}${ext}` };
-        sLog(`QGZ 已更新，加入 ${qgzLayers.length} 個圖層至「複丈歷史 / ${groupLabel}」`);
-      } catch(e) {
-        sLog(`⚠ QGZ 更新失敗: ${e.message}`);
-      }
-    }
-
-    // ── Results ───────────────────────────────────────────────────────────────
     sProg(100, '完成！');
-    const dlDiv = document.getElementById('survey-dl-btns');
-    dlDiv.innerHTML = '';
-
-    const addDlBtn = (label, blob, fname) => {
-      const btn = document.createElement('button');
-      btn.textContent = label;
-      btn.onclick = () => { const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fname; a.click(); };
-      dlDiv.appendChild(btn);
-    };
-
-    if (qgzBlob) {
-      addDlBtn(`📋 ${qgzBlob.name}`, new Blob([qgzBlob.buf],{type:'application/x-qgis'}), qgzBlob.name);
-    }
-
     document.getElementById('survey-result-section').hidden = false;
 
   } catch(e) {
