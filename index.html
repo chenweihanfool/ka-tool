@@ -88,6 +88,7 @@
   <!-- ── Tabs ── -->
   <div class="tabs">
     <button class="tab-btn active" onclick="switchTab(this,'process')">主處理</button>
+    <button class="tab-btn" onclick="switchTab(this,'survey')">複丈資料</button>
     <button class="tab-btn" onclick="switchTab(this,'config')">段代碼設定</button>
     <button class="tab-btn" onclick="switchTab(this,'about')">說明</button>
   </div>
@@ -131,6 +132,52 @@
     </div>
 
   </div><!-- /tab-process -->
+
+  <!-- ══ Tab: 複丈資料 ══ -->
+  <div id="tab-survey" class="tab-pane">
+
+    <div class="card">
+      <h2>步驟 1 — 選擇案件資料夾</h2>
+      <div class="step-row">
+        <button onclick="pickSurveyDir()">📁 選擇資料夾…</button>
+        <span id="lblSurveyDir" style="color:#888">尚未選擇（資料夾含 KA####.D14 等檔案）</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>步驟 2 — 選擇 QGIS 專案（可選）</h2>
+      <p style="font-size:12px;color:#888;margin-bottom:8px">選擇現有 .qgz 專案，系統將自動在「複丈歷史」群組下新增圖層</p>
+      <div class="step-row">
+        <button onclick="pickQGZFile()">📋 選擇 .qgz 專案…</button>
+        <span id="lblQGZ" style="color:#888">尚未選擇</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>步驟 3 — 輸出項目</h2>
+      <div class="check-group">
+        <label><input type="checkbox" id="surv-chk-pts" checked> 界址點（D14 COT_REF=0）</label>
+        <label><input type="checkbox" id="surv-chk-sub" checked> 補點（D14 COT_REF≠0）</label>
+        <label><input type="checkbox" id="surv-chk-cad" checked> 地籍圖線段（D21）</label>
+      </div>
+    </div>
+
+    <div class="card">
+      <button id="btnSurvey" class="primary" onclick="runSurvey()" disabled>▶ 開始處理</button>
+    </div>
+
+    <div class="card" id="survey-progress-section" hidden>
+      <div class="progress-bar"><div id="survey-progress-fill" style="height:100%;background:#1a5cb8;width:0;transition:width .2s;border-radius:5px"></div></div>
+      <div id="survey-progress-text" style="font-size:12px;color:#555;margin:6px 0"></div>
+      <div id="survey-log" style="font-family:monospace;font-size:11px;color:#444;background:#f5f7fa;border:1px solid #d8dde8;border-radius:4px;padding:8px;max-height:160px;overflow-y:auto;white-space:pre"></div>
+    </div>
+
+    <div class="card" id="survey-result-section" hidden>
+      <h2>處理結果</h2>
+      <div class="dl-group" id="survey-dl-btns"></div>
+    </div>
+
+  </div><!-- /tab-survey -->
 
   <!-- ══ Tab: 段代碼設定 ══ -->
   <div id="tab-config" class="tab-pane">
@@ -865,6 +912,513 @@ document.getElementById('ver-badge').textContent = APP_VERSION;
       <td>${c.note}</td>
     </tr>`).join('');
 })();
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 複丈資料處理 ──────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── sql.js lazy loader ────────────────────────────────────────────────────────
+let _SQL = null;
+function getSqlJs() {
+  if (_SQL) return Promise.resolve(_SQL);
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/sql.js@1.10.2/dist/sql-asm.js';
+    s.onload = () => initSqlJs({
+      locateFile: f => `https://cdn.jsdelivr.net/npm/sql.js@1.10.2/dist/${f}`,
+    }).then(sql => { _SQL = sql; resolve(sql); }).catch(reject);
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+}
+
+// ── WKB / GeoPackage helpers ─────────────────────────────────────────────────
+function _gpkgHdr(srsId = 3826) {
+  const b = new ArrayBuffer(8); const v = new DataView(b);
+  v.setUint8(0,0x47); v.setUint8(1,0x50); v.setUint8(2,0); v.setUint8(3,0x01); v.setInt32(4,srsId,true);
+  return new Uint8Array(b);
+}
+function _u8cat(...arrs) {
+  const out = new Uint8Array(arrs.reduce((s,a)=>s+a.length,0)); let off=0;
+  for (const a of arrs) { out.set(a,off); off+=a.length; } return out;
+}
+function wkbPoint(x, y) {            // x=Easting, y=Northing
+  const b=new ArrayBuffer(21); const v=new DataView(b);
+  v.setUint8(0,1); v.setUint32(1,1,true); v.setFloat64(5,x,true); v.setFloat64(13,y,true);
+  return _u8cat(_gpkgHdr(), new Uint8Array(b));
+}
+function wkbLineFromPts(pts) {       // pts=[[x,y],...]
+  const n=pts.length; const b=new ArrayBuffer(1+4+4+n*16); const v=new DataView(b);
+  let off=0; v.setUint8(off,1); off++; v.setUint32(off,2,true); off+=4; v.setUint32(off,n,true); off+=4;
+  for (const [x,y] of pts) { v.setFloat64(off,x,true); off+=8; v.setFloat64(off,y,true); off+=8; }
+  return _u8cat(_gpkgHdr(), new Uint8Array(b));
+}
+function wkbPolygonFromRing(ring) {  // ring=[[x,y],...] (will be auto-closed)
+  const pts=[...ring]; if(pts[0][0]!==pts.at(-1)[0]||pts[0][1]!==pts.at(-1)[1]) pts.push(pts[0]);
+  const n=pts.length; const b=new ArrayBuffer(1+4+4+4+n*16); const v=new DataView(b);
+  let off=0; v.setUint8(off,1); off++; v.setUint32(off,3,true); off+=4;
+  v.setUint32(off,1,true); off+=4; v.setUint32(off,n,true); off+=4;
+  for (const [x,y] of pts) { v.setFloat64(off,x,true); off+=8; v.setFloat64(off,y,true); off+=8; }
+  return _u8cat(_gpkgHdr(), new Uint8Array(b));
+}
+
+// ── Generic GeoPackage builder ────────────────────────────────────────────────
+// layerDefs: [{name, geomType, attrs:[{name,type}], rows:[{geom:Uint8Array,...attrs}]}]
+async function buildAndDownloadGPKG(filename, layerDefs) {
+  const SQL = await getSqlJs();
+  const db  = new SQL.Database();
+  db.run('PRAGMA application_id = 0x47504B47');
+  db.run('PRAGMA user_version  = 10300');
+
+  db.run(`CREATE TABLE gpkg_spatial_ref_sys (
+    srs_name TEXT NOT NULL, srs_id INTEGER NOT NULL PRIMARY KEY,
+    organization TEXT NOT NULL, organization_coordsys_id INTEGER NOT NULL,
+    definition TEXT NOT NULL, description TEXT)`);
+  db.run(`INSERT INTO gpkg_spatial_ref_sys VALUES
+    ('TWD97 / TM2 zone 121',3826,'EPSG',3826,
+     'PROJCS["TWD97 / TM2 zone 121",GEOGCS["TWD97",DATUM["Taiwan_Datum_1997",SPHEROID["GRS 1980",6378137,298.257222101]],PRIMEM["Greenwich",0],UNIT["degree",0.017453292519943278]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",121],PARAMETER["scale_factor",0.9999],PARAMETER["false_easting",250000],PARAMETER["false_northing",0],UNIT["metre",1]]',
+     'TWD97/TM2')`);
+  db.run(`INSERT INTO gpkg_spatial_ref_sys VALUES
+    ('Undefined cartesian',−1,'NONE',−1,'undefined','undefined')`);
+
+  db.run(`CREATE TABLE gpkg_contents (
+    table_name TEXT NOT NULL PRIMARY KEY, data_type TEXT NOT NULL,
+    identifier TEXT, description TEXT DEFAULT '',
+    last_change DATETIME NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    min_x REAL, min_y REAL, max_x REAL, max_y REAL, srs_id INTEGER)`);
+  db.run(`CREATE TABLE gpkg_geometry_columns (
+    table_name TEXT NOT NULL, column_name TEXT NOT NULL,
+    geometry_type_name TEXT NOT NULL, srs_id INTEGER NOT NULL,
+    z TINYINT NOT NULL DEFAULT 0, m TINYINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (table_name,column_name))`);
+
+  for (const tbl of layerDefs) {
+    if (!tbl.rows || tbl.rows.length === 0) continue;
+    const colDefs = tbl.attrs.map(a=>`"${a.name}" ${a.type}`).join(',');
+    db.run(`CREATE TABLE "${tbl.name}" (fid INTEGER PRIMARY KEY AUTOINCREMENT, geom BLOB,${colDefs})`);
+    db.run(`INSERT INTO gpkg_contents VALUES (?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'),NULL,NULL,NULL,NULL,3826)`,
+      [tbl.name,'features',tbl.name,tbl.name]);
+    db.run(`INSERT INTO gpkg_geometry_columns VALUES (?,?,?,3826,0,0)`,
+      [tbl.name,'geom',tbl.geomType.toUpperCase()]);
+    const ph = tbl.attrs.map(()=>'?').join(',');
+    const stmt = db.prepare(`INSERT INTO "${tbl.name}"(geom,${tbl.attrs.map(a=>'"'+a.name+'"').join(',')}) VALUES(?,${ph})`);
+    for (const row of tbl.rows) {
+      stmt.run([row.geom, ...tbl.attrs.map(a => row[a.name] ?? null)]);
+    }
+    stmt.free();
+  }
+
+  const data = db.export();
+  db.close();
+  const blob = new Blob([data], { type: 'application/geopackage+sqlite3' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url; a.download = filename; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+// ── DBF reader (dBASE III/IV, Big5 encoded) ───────────────────────────────────
+async function readDBF(fileHandle) {
+  const ab  = await (await fileHandle.getFile()).arrayBuffer();
+  const dv  = new DataView(ab);
+  const nr  = dv.getUint32(4, true);
+  const hs  = dv.getUint16(8, true);
+  const rs  = dv.getUint16(10, true);
+  const dec = new TextDecoder('big5');
+  const fields = [];
+  let pos = 32;
+  while (pos < hs - 1) {
+    const b = new Uint8Array(ab, pos, 32);
+    if (b[0] === 0x0D) break;
+    const name = new TextDecoder('ascii').decode(b.slice(0,11)).replace(/\x00/g,'').trim();
+    fields.push({ name, type: String.fromCharCode(b[11]), len: b[16], dec: b[17] });
+    pos += 32;
+  }
+  const records = [];
+  let rp = hs;
+  for (let i = 0; i < nr; i++, rp += rs) {
+    const rec = new Uint8Array(ab, rp, rs);
+    if (rec[0] === 0x2A) continue; // deleted
+    const d = {}; let off = 1;
+    for (const f of fields) {
+      d[f.name] = dec.decode(new Uint8Array(ab, rp + off, f.len)).trim();
+      off += f.len;
+    }
+    records.push(d);
+  }
+  return { fields, records };
+}
+
+// ── QGZ (gzip) decompressor / compressor ─────────────────────────────────────
+async function decompressGzip(ab) {
+  const ds = new DecompressionStream('gzip');
+  const w = ds.writable.getWriter(); const r = ds.readable.getReader();
+  w.write(new Uint8Array(ab)); w.close();
+  const chunks = []; while (true) { const {done,value}=await r.read(); if(done)break; chunks.push(value); }
+  const total = chunks.reduce((s,c)=>s+c.length,0);
+  const out = new Uint8Array(total); let o=0; for(const c of chunks){out.set(c,o);o+=c.length;}
+  return new TextDecoder('utf-8').decode(out);
+}
+async function compressGzip(str) {
+  const cs = new CompressionStream('gzip');
+  const w = cs.writable.getWriter(); const r = cs.readable.getReader();
+  w.write(new TextEncoder().encode(str)); w.close();
+  const chunks=[]; while(true){const{done,value}=await r.read();if(done)break;chunks.push(value);}
+  const total=chunks.reduce((s,c)=>s+c.length,0);
+  const out=new Uint8Array(total);let o=0;for(const c of chunks){out.set(c,o);o+=c.length;}
+  return out;
+}
+
+// ── QGS XML update: add 複丈 layers under 複丈歷史 group ──────────────────────
+function patchQGS(xmlStr, groupLabel, layerSpecs, gpkgRelPath) {
+  // layerSpecs: [{id, name, geomType, tableName}]
+  const geomMap = {POINT:'Point', LINESTRING:'Line', POLYGON:'Polygon'};
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xmlStr, 'text/xml');
+
+  // Add maplayer entries
+  const projLayers = doc.querySelector('projectlayers');
+  if (projLayers) {
+    for (const lyr of layerSpecs) {
+      const ml = doc.createElement('maplayer');
+      ml.setAttribute('type', 'vector');
+      ml.setAttribute('geometry', geomMap[lyr.geomType] || 'Point');
+      ml.setAttribute('autoRefreshEnabled', '0');
+      const srsXml = `<srs><spatialrefsys nativeFormat="Wkt"><authid>EPSG:3826</authid><description>TWD97 / TM2 zone 121</description></spatialrefsys></srs>`;
+      ml.innerHTML = `<id>${lyr.id}</id><datasource>${gpkgRelPath}|layername=${lyr.tableName}</datasource><layername>${lyr.name}</layername>${srsXml}<geometrytype>${geomMap[lyr.geomType]||'Point'}</geometrytype>`;
+      projLayers.appendChild(ml);
+    }
+  }
+
+  // Find root layer-tree-group
+  const rootLTG = doc.querySelector('layer-tree-group');
+  if (!rootLTG) return new XMLSerializer().serializeToString(doc);
+
+  // Find or create 複丈歷史 group
+  let histGrp = null;
+  for (const g of rootLTG.children) {
+    if (g.tagName === 'layer-tree-group' && g.getAttribute('name') === '複丈歷史') {
+      histGrp = g; break;
+    }
+  }
+  if (!histGrp) {
+    histGrp = doc.createElement('layer-tree-group');
+    histGrp.setAttribute('name', '複丈歷史');
+    histGrp.setAttribute('checked', 'Qt::Checked');
+    histGrp.setAttribute('expanded', '1');
+    rootLTG.insertBefore(histGrp, rootLTG.firstChild);
+  }
+
+  // Create date subgroup (insert at top = newest first)
+  const dateGrp = doc.createElement('layer-tree-group');
+  dateGrp.setAttribute('name', groupLabel);
+  dateGrp.setAttribute('checked', 'Qt::Checked');
+  dateGrp.setAttribute('expanded', '1');
+  for (const lyr of [...layerSpecs].reverse()) { // reverse = top layer first
+    const ltl = doc.createElement('layer-tree-layer');
+    ltl.setAttribute('id', lyr.id); ltl.setAttribute('name', lyr.name);
+    ltl.setAttribute('checked', 'Qt::Checked'); ltl.setAttribute('expanded', '1');
+    dateGrp.insertBefore(ltl, dateGrp.firstChild);
+  }
+  histGrp.insertBefore(dateGrp, histGrp.firstChild);
+
+  return new XMLSerializer().serializeToString(doc);
+}
+
+// ── Generate short random layer ID ───────────────────────────────────────────
+function newLayerId(name) {
+  const hex = [...Array(8)].map(()=>Math.floor(Math.random()*16).toString(16)).join('');
+  return `${name}_${hex}`;
+}
+
+// ── 複丈 tab state ────────────────────────────────────────────────────────────
+let _surveyDir = null;
+let _qgzFile   = null;
+
+async function pickSurveyDir() {
+  try {
+    _surveyDir = await window.showDirectoryPicker({ mode: 'read' });
+    document.getElementById('lblSurveyDir').textContent = `✓ ${_surveyDir.name}`;
+    document.getElementById('lblSurveyDir').style.color = '#2a7a3a';
+    document.getElementById('btnSurvey').disabled = false;
+  } catch(e) { if(e.name!=='AbortError') alert(e.message); }
+}
+
+async function pickQGZFile() {
+  try {
+    [_qgzFile] = await window.showOpenFilePicker({
+      types: [{ description:'QGIS Project', accept:{'application/x-qgis':['.qgz','.qgs']} }],
+    });
+    document.getElementById('lblQGZ').textContent = `✓ ${_qgzFile.name}`;
+    document.getElementById('lblQGZ').style.color = '#2a7a3a';
+  } catch(e) { if(e.name!=='AbortError') alert(e.message); }
+}
+
+function sLog(msg) {
+  const el = document.getElementById('survey-log');
+  el.textContent += msg + '\n'; el.scrollTop = el.scrollHeight;
+}
+function sProg(pct, msg) {
+  document.getElementById('survey-progress-fill').style.width = pct + '%';
+  document.getElementById('survey-progress-text').textContent = msg;
+}
+
+async function runSurvey() {
+  if (!_surveyDir) return;
+  document.getElementById('survey-progress-section').hidden = false;
+  document.getElementById('survey-result-section').hidden   = true;
+  document.getElementById('btnSurvey').disabled = true;
+  document.getElementById('survey-log').textContent = '';
+
+  const doPts = document.getElementById('surv-chk-pts').checked;
+  const doSub = document.getElementById('surv-chk-sub').checked;
+  const doCad = document.getElementById('surv-chk-cad').checked;
+
+  try {
+    sProg(5, '掃描資料夾…');
+    const caseId = _surveyDir.name; // e.g. KA1153
+    let caseDate = new Date().toISOString().slice(0,10);
+
+    // Find date from XXXXXXX.txt (ROC date format)
+    for await (const entry of _surveyDir.values()) {
+      if (entry.kind==='file' && /^\d{7}\.txt$/i.test(entry.name)) {
+        const s = entry.name.slice(0,7);
+        const adYear = parseInt(s.slice(0,3)) + 1911;
+        caseDate = `${adYear}-${s.slice(3,5)}-${s.slice(5,7)}`;
+        break;
+      }
+    }
+    sLog(`案號: ${caseId}  日期: ${caseDate}`);
+
+    // Find prefix from KA####.D14 pattern
+    let prefix = null, segNum = null;
+    for await (const entry of _surveyDir.values()) {
+      const m = /^([A-Z]+)(\d+)\.D14$/i.exec(entry.name);
+      if (m) { prefix = m[1].toUpperCase(); segNum = m[2]; break; }
+    }
+    if (!prefix) throw new Error('找不到 .D14 檔案');
+    const baseName = prefix + segNum;
+    sLog(`檔案前綴: ${baseName}`);
+
+    // ── Read D14 ──────────────────────────────────────────────────────────────
+    sProg(15, '讀取 D14…');
+    const d14h = await _surveyDir.getFileHandle(`${baseName}.D14`).catch(()=>null);
+    if (!d14h) throw new Error(`找不到 ${baseName}.D14`);
+    const { records: d14 } = await readDBF(d14h);
+    sLog(`D14: ${d14.length} 筆`);
+
+    // Build coordinate lookup: COT_NUMBER → {x,y} (using first match for each number)
+    const coordMap = new Map();
+    for (const r of d14) {
+      const key = `${r.COT_NUMBER}_${r.COT_REF||'0'}`;
+      const x = parseFloat(r.COT_X), y = parseFloat(r.COT_Y);
+      if (isFinite(x) && isFinite(y)) coordMap.set(r.COT_NUMBER, {x,y}); // COT_REF=0 points only overwrite later
+    }
+    // Rebuild with only COT_REF=0 as primary coords
+    const ptCoords = new Map();
+    for (const r of d14) {
+      if (r.COT_REF === '0') {
+        const x = parseFloat(r.COT_X), y = parseFloat(r.COT_Y);
+        if (isFinite(x) && isFinite(y)) ptCoords.set(r.COT_NUMBER, {x,y});
+      }
+    }
+    // also include sub-points for line building
+    const allCoords = new Map();
+    for (const r of d14) {
+      const x = parseFloat(r.COT_X), y = parseFloat(r.COT_Y);
+      if (isFinite(x) && isFinite(y)) allCoords.set(r.COT_NUMBER, {x,y});
+    }
+
+    // ── Read D21 ──────────────────────────────────────────────────────────────
+    sProg(35, '讀取 D21…');
+    let d21 = [];
+    const d21h = await _surveyDir.getFileHandle(`${baseName}.D21`).catch(()=>null);
+    if (d21h) {
+      const { records } = await readDBF(d21h);
+      d21 = records;
+      sLog(`D21: ${d21.length} 筆`);
+    }
+
+    // ── Read D11 ──────────────────────────────────────────────────────────────
+    sProg(50, '讀取 D11…');
+    let d11 = [];
+    const d11h = await _surveyDir.getFileHandle(`${baseName}.D11`).catch(()=>null);
+    if (d11h) {
+      const { records } = await readDBF(d11h);
+      d11 = records;
+      sLog(`D11: ${d11.length} 筆`);
+    }
+
+    // ── Build layers ──────────────────────────────────────────────────────────
+    sProg(65, '建立圖層…');
+    const layerDefs = [];
+
+    // 1. 界址點 (D14, COT_REF=0)
+    if (doPts) {
+      const rows = d14
+        .filter(r => r.COT_REF === '0')
+        .map(r => {
+          const x = parseFloat(r.COT_X), y = parseFloat(r.COT_Y);
+          if (!isFinite(x) || !isFinite(y)) return null;
+          return {
+            geom: wkbPoint(x, y),
+            COT_NUMBER: r.COT_NUMBER,
+            COT_Y: y, COT_X: x,
+            COT_MATTER: r.COT_MATTER,
+            COT_SOURCE: r.COT_SOURCE,
+            COT_REMARK: r.COT_REMARK,
+          };
+        }).filter(Boolean);
+      layerDefs.push({
+        name: '界址點',
+        geomType: 'POINT',
+        attrs: [
+          {name:'COT_NUMBER',type:'INTEGER'},
+          {name:'COT_Y',type:'REAL'},{name:'COT_X',type:'REAL'},
+          {name:'COT_MATTER',type:'INTEGER'},
+          {name:'COT_SOURCE',type:'INTEGER'},
+          {name:'COT_REMARK',type:'TEXT'},
+        ],
+        rows,
+      });
+      sLog(`界址點: ${rows.length} 筆`);
+    }
+
+    // 2. 補點 (D14, COT_REF≠0)
+    if (doSub) {
+      const rows = d14
+        .filter(r => r.COT_REF !== '0' && r.COT_REF !== '')
+        .map(r => {
+          const x = parseFloat(r.COT_X), y = parseFloat(r.COT_Y);
+          if (!isFinite(x) || !isFinite(y)) return null;
+          return {
+            geom: wkbPoint(x, y),
+            COT_NUMBER: r.COT_NUMBER,
+            COT_REF: r.COT_REF,
+            PT_ID: `${r.COT_NUMBER}.${r.COT_REF}`,
+            COT_Y: y, COT_X: x,
+            COT_SOURCE: r.COT_SOURCE,
+          };
+        }).filter(Boolean);
+      layerDefs.push({
+        name: '補點',
+        geomType: 'POINT',
+        attrs: [
+          {name:'COT_NUMBER',type:'INTEGER'},
+          {name:'COT_REF',type:'INTEGER'},
+          {name:'PT_ID',type:'TEXT'},
+          {name:'COT_Y',type:'REAL'},{name:'COT_X',type:'REAL'},
+          {name:'COT_SOURCE',type:'INTEGER'},
+        ],
+        rows,
+      });
+      sLog(`補點: ${rows.length} 筆`);
+    }
+
+    // 3. 地籍圖 (D21 line segments, grouped by non-zero section)
+    if (doCad && d21.length > 0) {
+      // Collect distinct non-zero sections
+      const sections = new Set();
+      for (const r of d21) {
+        if (r.L_SECTION && r.L_SECTION !== '0') sections.add(r.L_SECTION);
+        if (r.R_SECTION && r.R_SECTION !== '0') sections.add(r.R_SECTION);
+      }
+      const secList = [...sections].sort((a,b)=>+a-+b);
+
+      for (const sec of secList) {
+        const rows = [];
+        for (const r of d21) {
+          if (r.L_SECTION !== sec && r.R_SECTION !== sec) continue;
+          const top = allCoords.get(r.LIN_TOP);
+          const bot = allCoords.get(r.LIN_BOT);
+          if (!top || !bot) continue;
+          const pts = r.LIN_MID && r.LIN_MID !== '0'
+            ? [top, allCoords.get(r.LIN_MID), bot].filter(Boolean)
+            : [top, bot];
+          rows.push({
+            geom: wkbLineFromPts(pts.map(p=>[p.x,p.y])),
+            L_SEC: r.L_SECTION, L_PAR: r.L_PARCEL,
+            R_SEC: r.R_SECTION, R_PAR: r.R_PARCEL,
+            LIN_MODE: r.LIN_MODE,
+          });
+        }
+        const layerName = `地籍圖_S${sec.padStart(4,'0')}`;
+        layerDefs.push({
+          name: layerName, geomType: 'LINESTRING',
+          attrs: [
+            {name:'L_SEC',type:'INTEGER'},{name:'L_PAR',type:'INTEGER'},
+            {name:'R_SEC',type:'INTEGER'},{name:'R_PAR',type:'INTEGER'},
+            {name:'LIN_MODE',type:'INTEGER'},
+          ],
+          rows,
+        });
+        sLog(`${layerName}: ${rows.length} 筆線段`);
+      }
+    }
+
+    // ── Write GeoPackage ──────────────────────────────────────────────────────
+    sProg(80, '輸出 GeoPackage…');
+    const gpkgName = `${caseId}_${caseDate}.gpkg`;
+    await buildAndDownloadGPKG(gpkgName, layerDefs);
+    sLog(`已輸出 ${gpkgName}`);
+
+    // ── Update QGZ if provided ────────────────────────────────────────────────
+    let qgzBlob = null;
+    if (_qgzFile) {
+      sProg(90, '更新 QGZ 專案…');
+      try {
+        const ab = await (await _qgzFile.getFile()).arrayBuffer();
+        const isGz = new Uint8Array(ab,0,2)[0]===0x1f && new Uint8Array(ab,0,2)[1]===0x8b;
+        const xmlStr = isGz ? await decompressGzip(ab)
+                             : new TextDecoder('utf-8').decode(ab);
+
+        // Layer specs for QGZ
+        const qgzLayers = layerDefs
+          .filter(l => l.rows && l.rows.length > 0)
+          .map(l => ({
+            id:       newLayerId(l.name),
+            name:     l.name,
+            geomType: l.geomType,
+            tableName:l.name,
+          }));
+
+        const groupLabel = `${caseDate} ${caseId}`;
+        const gpkgRel = `./${gpkgName}`; // relative path (same folder as QGZ)
+        const patchedXml = patchQGS(xmlStr, groupLabel, qgzLayers, gpkgRel);
+        const outBuf = isGz ? await compressGzip(patchedXml)
+                             : new TextEncoder().encode(patchedXml);
+        const ext = _qgzFile.name.endsWith('.qgs') ? '.qgs' : '.qgz';
+        qgzBlob = { buf: outBuf, name: `${caseId}_${caseDate}${ext}` };
+        sLog(`QGZ 已更新，加入 ${qgzLayers.length} 個圖層至「複丈歷史 / ${groupLabel}」`);
+      } catch(e) {
+        sLog(`⚠ QGZ 更新失敗: ${e.message}`);
+      }
+    }
+
+    // ── Results ───────────────────────────────────────────────────────────────
+    sProg(100, '完成！');
+    const dlDiv = document.getElementById('survey-dl-btns');
+    dlDiv.innerHTML = '';
+
+    const addDlBtn = (label, blob, fname) => {
+      const btn = document.createElement('button');
+      btn.textContent = label;
+      btn.onclick = () => { const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fname; a.click(); };
+      dlDiv.appendChild(btn);
+    };
+
+    if (qgzBlob) {
+      addDlBtn(`📋 ${qgzBlob.name}`, new Blob([qgzBlob.buf],{type:'application/x-qgis'}), qgzBlob.name);
+    }
+
+    document.getElementById('survey-result-section').hidden = false;
+
+  } catch(e) {
+    sLog(`❌ 錯誤: ${e.message}`);
+    console.error(e);
+  }
+  document.getElementById('btnSurvey').disabled = false;
+}
 </script>
 </body>
 </html>
