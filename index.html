@@ -792,12 +792,12 @@ async function runProcess() {
         name: '圖根點', geomType: 'POINT',
         attrs: [{name:'SEG_CODE',type:'TEXT'},{name:'PT_NAME',type:'TEXT'},
                 {name:'N_TWD97',type:'REAL'},{name:'E_TWD97',type:'REAL'},
-                {name:'CRS',type:'TEXT'}],
+                {name:'CRS',type:'TEXT'},{name:'STATE',type:'TEXT'}],
         rows: ctlFeatures.map(f => ({
           geom: wkbPoint(f.geometry.coordinates[0], f.geometry.coordinates[1]),
           SEG_CODE: f.properties.SEG_CODE, PT_NAME: f.properties.PT_NAME,
           N_TWD97: f.properties.N_TWD97, E_TWD97: f.properties.E_TWD97,
-          CRS: f.properties.CRS,
+          CRS: f.properties.CRS, STATE: '?',
         })),
       });
 
