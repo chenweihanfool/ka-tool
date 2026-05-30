@@ -608,8 +608,7 @@ async function processOneDir({ dir, prefix, crsType },
         properties: {
           SEG_CODE: segCode,
           SEG_NAME: SEG_NAMES[segCode] ?? '',
-          SHEET:    sheetId,
-          圖幅號:   dir.name.slice(-2),   // 最後 2 碼
+          圖幅號:   dir.name.slice(-2),
         },
       });
     }
