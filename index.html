@@ -197,6 +197,7 @@
       <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
         <button class="primary" onclick="downloadCoordTxt()">⬇ 座標 TXT（經緯儀/GPS）</button>
         <button onclick="downloadGoogleKML()">📍 下載 KML（Google My Maps）</button>
+        <button onclick="downloadMarkedGPKG()">⬇ GPKG（含 SELECTED 標記）</button>
       </div>
     </div>
 
@@ -263,7 +264,7 @@
 'use strict';
 
 // ── 版本 & 歷程 ──────────────────────────────────────────────────────────────
-const APP_VERSION = 'v1.5.1';
+const APP_VERSION = 'v1.5.2';
 const CHANGELOG = [
   { ver: 'v1.5.1', date: '2026-05-10', note: '主處理輸出格式改為 GeoPackage（地籍_YYYYMMDD.gpkg），單檔包含所有勾選圖層' },
   { ver: 'v1.5.0', date: '2026-05-10', note: '複丈資料分頁：讀取 D14/D21/D11（DBF），輸出界址點、補點、地籍圖線段為 GeoPackage，並自動更新 QGIS QGZ 專案' },
@@ -1229,6 +1230,8 @@ let _sD2B         = [];          // D2B records      宗地清單用（地號下
 let _sd21         = [];          // D21 records      界址點查找（跨圖幅權威來源）
 let _sCaseId      = '';
 let _sSurveyDate  = '';          // 放樣日期（使用者輸入）
+let _sLastLayerDefs = null;      // 最後一次 runSurvey 產生的 layerDefs（供重新匯出用）
+let _sLastGpkgName  = '';        // 最後一次輸出的 GPKG 檔名
 
 // ── 地號選擇器 ────────────────────────────────────────────────────────────────
 // 從 D2B 建立地號清單（直接記錄宗地邊界點，比走 D21 拓撲更可靠）
@@ -1392,6 +1395,34 @@ function downloadGoogleKML() {
   );
 }
 
+// 重新輸出 GPKG，並根據目前選定的地號在界址點圖層標記 SELECTED = 'O' / 'X'
+async function downloadMarkedGPKG() {
+  if (!_sLastLayerDefs) { alert('請先執行複丈處理'); return; }
+
+  const sel  = document.getElementById('parcel-select');
+  const vals = [...sel.selectedOptions].map(o => o.value);
+  if (!vals.length) { alert('請先選擇地號'); return; }
+
+  // 1. 收集所有選定地號的界址點 ID（D21 跨圖幅）
+  const selPtIds = new Set();
+  for (const val of vals) {
+    const [sec, m, c] = val.split(',').map(Number);
+    for (const id of getParcelPtIds(sec, m, c)) selPtIds.add(id);
+  }
+
+  // 2. 更新界址點 layer 的 SELECTED 欄位
+  const bpLayer = _sLastLayerDefs.find(l => l.name === '界址點');
+  if (bpLayer) {
+    for (const row of bpLayer.rows) {
+      row.SELECTED = selPtIds.has(row.COT_NUMBER) ? 'O' : 'X';
+    }
+    const oCount = bpLayer.rows.filter(r => r.SELECTED === 'O').length;
+    sLog(`SELECTED 標記：O=${oCount}  X=${bpLayer.rows.length - oCount}`);
+  }
+
+  await buildAndDownloadGPKG(_sLastGpkgName, _sLastLayerDefs);
+}
+
 async function pickSurveyDir() {
   try {
     _surveyDir = await window.showDirectoryPicker({ mode: 'read' });
@@ -1511,6 +1542,7 @@ async function runSurvey() {
             COT_MATTER: r.COT_MATTER,
             COT_SOURCE: r.COT_SOURCE,
             COT_REMARK: r.COT_REMARK,
+            SELECTED: 'X',       // 'O' = 選定地號的界址點，'X' = 其他
           };
         }).filter(Boolean);
       layerDefs.push({
@@ -1522,6 +1554,7 @@ async function runSurvey() {
           {name:'COT_MATTER',type:'INTEGER'},
           {name:'COT_SOURCE',type:'INTEGER'},
           {name:'COT_REMARK',type:'TEXT'},
+          {name:'SELECTED',type:'TEXT'},
         ],
         rows,
       });
@@ -1658,6 +1691,8 @@ async function runSurvey() {
     sLog(`已輸出 ${gpkgName}`);
 
     // ── 儲存全域供地號選擇器使用 ──────────────────────────────────────────────
+    _sLastLayerDefs = layerDefs;   // 供 downloadMarkedGPKG() 重新匯出
+    _sLastGpkgName  = gpkgName;
     _sCaseId      = caseId;
     _sSurveyDate  = caseDate;
     _sPtMain      = ptCoordsMain;
