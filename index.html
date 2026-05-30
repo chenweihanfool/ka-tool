@@ -195,9 +195,9 @@
       </div>
       <div style="margin-top:10px;font-size:12px;color:#666" id="parcel-sel-info"></div>
       <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="primary" onclick="downloadMarkedGPKG()">⬇ 下載 GPKG</button>
         <button class="primary" onclick="downloadCoordTxt()">⬇ 座標 TXT（經緯儀/GPS）</button>
         <button onclick="downloadGoogleKML()">📍 下載 KML（Google My Maps）</button>
-        <button onclick="downloadMarkedGPKG()">⬇ GPKG（含 SELECTED 標記）</button>
       </div>
     </div>
 
@@ -1395,13 +1395,13 @@ function downloadGoogleKML() {
   );
 }
 
-// 重新輸出 GPKG，並根據目前選定的地號在界址點圖層標記 SELECTED = 'O' / 'X'
+// 輸出 GPKG，並根據目前選定的地號在界址點圖層標記 SELECTED = 'O' / 'X'
 async function downloadMarkedGPKG() {
   if (!_sLastLayerDefs) { alert('請先執行複丈處理'); return; }
 
   const sel  = document.getElementById('parcel-select');
   const vals = [...sel.selectedOptions].map(o => o.value);
-  if (!vals.length) { alert('請先選擇地號'); return; }
+  if (!vals.length) { alert('請先在上方選擇地號'); return; }
 
   // 1. 收集所有選定地號的界址點 ID（D21 跨圖幅）
   const selPtIds = new Set();
@@ -1684,14 +1684,9 @@ async function runSurvey() {
       sLog(`補點: ${rows.length} 筆`);
     }
 
-    // ── Write GeoPackage ──────────────────────────────────────────────────────
-    sProg(90, '輸出 GeoPackage…');
-    const gpkgName = `${caseId}_${caseDate}.gpkg`;
-    await buildAndDownloadGPKG(gpkgName, layerDefs);
-    sLog(`已輸出 ${gpkgName}`);
-
     // ── 儲存全域供地號選擇器使用 ──────────────────────────────────────────────
-    _sLastLayerDefs = layerDefs;   // 供 downloadMarkedGPKG() 重新匯出
+    const gpkgName  = `${caseId}_${caseDate}.gpkg`;
+    _sLastLayerDefs = layerDefs;   // 供 downloadMarkedGPKG() 匯出
     _sLastGpkgName  = gpkgName;
     _sCaseId      = caseId;
     _sSurveyDate  = caseDate;
@@ -1701,7 +1696,7 @@ async function runSurvey() {
     _sD2B         = d2b;
     _sd21         = d21;         // D21 拓撲（跨圖幅界址點查找）
 
-    sProg(100, '完成！');
+    sProg(100, '完成！請選擇地號後下載 GPKG');
     document.getElementById('survey-result-section').hidden = false;
     populateParcelSelect(d2b.length ? d2b : []);
 
