@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>地籍圖整合工具</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.9.0/proj4.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Segoe UI', system-ui, sans-serif; background: #f0f2f5; color: #222; font-size: 14px; }
@@ -70,6 +72,16 @@
            font-weight: 600; background: #e4ecfa; color: #1a5cb8; }
   .badge.warn { background: #fff0d9; color: #a05c00; }
 
+
+  #map-container { height: 520px; border-radius: 8px; border: 1px solid #d8dde8; z-index: 0; }
+  #map-container .leaflet-popup-content { font-size: 13px; line-height: 1.5; min-width: 160px; }
+  #map-container .leaflet-popup-content .nav-btn { display: inline-block; margin-top: 6px; padding: 6px 14px; background: #1a5cb8; color: #fff; border-radius: 5px; text-decoration: none; font-size: 13px; font-weight: 600; }
+  #map-container .leaflet-popup-content .nav-btn:hover { background: #144fa3; }
+  .map-toolbar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; align-items: center; }
+  .map-toolbar label { display: flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; }
+  .map-toolbar label input[type=checkbox] { width: 14px; height: 14px; }
+  #map-info { font-size: 12px; color: #888; }
+
   /* about */
   .about-section { line-height: 1.7; }
   .about-section h3 { font-size: 13px; font-weight: 600; color: #1a3a5c; margin: 14px 0 4px; }
@@ -90,6 +102,7 @@
     <button class="tab-btn active" onclick="switchTab(this,'process')">主處理</button>
     <button class="tab-btn" onclick="switchTab(this,'survey')">複丈資料</button>
     <button class="tab-btn" onclick="switchTab(this,'config')">段代碼設定</button>
+    <button class="tab-btn" onclick="switchTab(this,'map')">🗺️ 地圖導航</button>
     <button class="tab-btn" onclick="switchTab(this,'about')">說明</button>
   </div>
 
@@ -258,14 +271,40 @@
     </div>
   </div><!-- /tab-about -->
 
+
+  <!-- ⭐ Tab: 地圖導航 ⭐ -->
+  <div id="tab-map" class="tab-pane">
+    <div class="card">
+      <h2>🗺️ 地圖導航</h2>
+      <p style="font-size:12px;color:#888;margin-bottom:10px">點擊地圖上的標記 → 按「📍 導航到這裡」→ 手機自動開啟 Google Maps</p>
+      <div class="map-toolbar">
+        <span style="font-size:13px;font-weight:600;color:#1a3a5c">資料來源：</span>
+        <button class="primary" onclick="mapLoadSurvey()">📋 複丈資料</button>
+        <button onclick="mapLoadGPKG()">📂 載入 GPKG</button>
+        <button onclick="mapLoadKML()">📂 載入 KML</button>
+        <span id="map-info" style="margin-left:auto;font-size:12px;color:#888">尚未載入資料</span>
+      </div>
+      <div class="map-toolbar">
+        <label><input type="checkbox" class="map-layer" data-layer="pt" checked onchange="mapToggleLayer()"> 界址點</label>
+        <label><input type="checkbox" class="map-layer" data-layer="par" checked onchange="mapToggleLayer()"> 宗地</label>
+        <label><input type="checkbox" class="map-layer" data-layer="ctl" onchange="mapToggleLayer()"> 圖根點</label>
+        <label><input type="checkbox" class="map-layer" data-layer="sub" onchange="mapToggleLayer()"> 參考點</label>
+        <label><input type="checkbox" class="map-layer" data-layer="q" onchange="mapToggleLayer()"> 補點</label>
+      </div>
+      <div id="map-container"></div>
+    </div>
+  </div>
+
 </div><!-- /app -->
 
 <script>
 'use strict';
 
 // ── 版本 & 歷程 ──────────────────────────────────────────────────────────────
-const APP_VERSION = 'v1.5.2';
+const APP_VERSION = 'v1.6.0';
 const CHANGELOG = [
+  { ver: 'v1.6.0', date: '2026-06-16', note: '🗺️ 地圖導航分頁：以 Leaflet 地圖顯示界址點/宗地/參考點/補點，點擊即可導航至 Google Maps，支援載入 GPKG/KML' },
+  { ver: 'v1.5.2', date: '2026-05-10', note: 'D14 COT_REF 判斷修正、D29 LIN_MID 參考線支援' },
   { ver: 'v1.5.1', date: '2026-05-10', note: '主處理輸出格式改為 GeoPackage（地籍_YYYYMMDD.gpkg），單檔包含所有勾選圖層' },
   { ver: 'v1.5.0', date: '2026-05-10', note: '複丈資料分頁：讀取 D14/D21/D11（DBF），輸出界址點、補點、地籍圖線段為 GeoPackage，並自動更新 QGIS QGZ 專案' },
   { ver: 'v1.4.0', date: '2026-05-10', note: '圖幅號圖層（10碼目錄外包矩形）、宗地中文段名欄位、界址點預設不勾選、段名資料來源 api.nlsc.gov.tw' },
@@ -1706,6 +1745,110 @@ async function runSurvey() {
   }
   document.getElementById('btnSurvey').disabled = false;
 }
+
+// ── Map Navigation ──────────────────────────────────────────────────────
+var _map = null, _mapLayers = {}, _mapData = {};
+function initMap() {
+  if (_map) return;
+  var el = document.getElementById('map-container');
+  if (!el || el.offsetParent === null) return;
+  _map = L.map('map-container', { zoomControl: true }).setView([24.5, 120.9], 13);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '\u00a9 OpenStreetMap' }).addTo(_map);
+  ['pt','par','ctl','sub','q'].forEach(function(k) { _mapLayers[k] = L.layerGroup().addTo(_map); _mapData[k] = []; });
+}
+function twd97toWgs84(x, y) { return proj4('EPSG:3826', 'EPSG:4326', [x, y]); }
+function clearMap() { Object.keys(_mapLayers).forEach(function(k) { _mapLayers[k].clearLayers(); _mapData[k] = []; }); }
+function renderGeoJSON(layerKey, features, color, shape) {
+  var group = _mapLayers[layerKey];
+  if (!group || !features.length) return;
+  features.forEach(function(f) {
+    if (!f.geometry) return;
+    var props = f.properties || {};
+    var name = props.name || props.COT_NUMBER || props.id || '';
+    var desc = Object.keys(props).filter(function(k) { return k !== 'type'; }).map(function(k) { return k+': '+props[k]; }).join('<br>');
+    var popup = '<b>'+name+'</b><br>'+desc;
+    if (f.geometry.type === 'Point') {
+      var lat = f.geometry.coordinates[1], lon = f.geometry.coordinates[0];
+      var marker;
+      if (shape === 'circle') { marker = L.circleMarker([lat, lon], { radius: 7, fillColor: color, color: '#fff', weight: 1.5, fillOpacity: 0.85 }); }
+      else { marker = L.marker([lat, lon], { icon: L.divIcon({ className: '', html: '\uD83D\uDCCD', iconSize: [20,20], iconAnchor: [10,20] }) }); }
+      marker.bindPopup(popup+'<br><a class="nav-btn" href="https://www.google.com/maps/dir/?api=1&destination='+lat+','+lon+'" target="_blank">\uD83D\uDCCD \u5C0E\u822A\u5230\u9019\u88E1</a>');
+      group.addLayer(marker);
+    } else if (f.geometry.type === 'Polygon' && shape === 'polygon') {
+      var lls = f.geometry.coordinates[0].map(function(c) { return [c[1], c[0]]; });
+      var poly = L.polygon(lls, { color: color, weight: 1.5, fillOpacity: 0.12 });
+      poly.bindPopup(popup); group.addLayer(poly);
+    }
+  });
+}
+function fitMapBounds() {
+  if (!_map) return;
+  var allBounds = [];
+  Object.keys(_mapLayers).forEach(function(k) { var b = _mapLayers[k].getBounds(); if (b.isValid()) allBounds.push(b); });
+  if (allBounds.length) { var c = allBounds[0]; for (var i=1; i<allBounds.length; i++) c.extend(allBounds[i]); _map.fitBounds(c, { padding: [40,40], maxZoom: 17 }); }
+}
+window.mapLoadSurvey = function() {
+  if (typeof _sPtMain === 'undefined' || !_sPtMain.size) { alert('\u8ACB\u5148\u5728\u300C\u8907\u4E08\u8CC7\u6599\u300D\u5206\u9801\u8655\u7406\u8CC7\u6599'); return; }
+  initMap(); clearMap();
+  var ptC=0,subC=0,qC=0,parC=0;
+  var ptF=[]; _sPtMain.forEach(function(p,id) { var ll=twd97toWgs84(p.x,p.y); if(!isFinite(ll[0])) return; ptF.push({type:'Feature',geometry:{type:'Point',coordinates:ll},properties:{id:id,name:'\u754C\u5740\u9EDE '+id,type:'pt'}}); ptC++; });
+  _mapData.pt=ptF; renderGeoJSON('pt',ptF,'#ff6b6b','circle');
+  var subF=[]; _sSub.forEach(function(p,key) { var ll=twd97toWgs84(p.x,p.y); if(!isFinite(ll[0])) return; subF.push({type:'Feature',geometry:{type:'Point',coordinates:ll},properties:{id:key,name:'\u53C3\u8003\u9EDE '+key,type:'sub'}}); subC++; });
+  _mapData.sub=subF; renderGeoJSON('sub',subF,'#ffd43b','diamond');
+  var qF=[]; _sD20.forEach(function(r) { var x=+r.CTL_X,y=+r.CTL_Y; if(!isFinite(x)||!isFinite(y)||!r.CTL_NAME) return; var ll=twd97toWgs84(x,y); if(!isFinite(ll[0])) return; qF.push({type:'Feature',geometry:{type:'Point',coordinates:ll},properties:{id:r.CTL_NAME,name:'\u88DC\u9EDE '+r.CTL_NAME,type:'q'}}); qC++; });
+  _mapData.q=qF; renderGeoJSON('q',qF,'#4dabf7','square');
+  if(_sD2B&&_sD2B.length) {
+    var seen={},parF=[]; _sD2B.forEach(function(r) {
+      var sec=+r.O_SECTION,m=+r.O_PARCEL,c=+(r.O_PARCEL_E||'0'),key=sec+','+m+','+c; if(seen[key]) return; seen[key]=true;
+      var ct=calcParcelCentroid(sec,m,c); if(!ct) return; var ll=twd97toWgs84(ct.x,ct.y); if(!isFinite(ll[0])) return;
+      parF.push({type:'Feature',geometry:{type:'Point',coordinates:ll},properties:{id:key,name:'\u5B97\u5730 '+(c>0?m+'-'+c:''+m),type:'par'}}); parC++;
+    });
+    _mapData.par=parF; renderGeoJSON('par',parF,'#00ff88','marker');
+  }
+  fitMapBounds(); document.getElementById('map-info').textContent='\u754C\u5740\u9EDE '+ptC+' \u00B7 \u53C3\u8003\u9EDE '+subC+' \u00B7 \u88DC\u9EDE '+qC+' \u00B7 \u5B97\u5730 '+parC;
+};
+window.mapLoadGPKG = async function() {
+  try {
+    var h=await window.showOpenFilePicker({types:[{description:'GeoPackage',accept:{'application/geopackage+sqlite3':['.gpkg']}}]});
+    initMap(); clearMap();
+    var SQL=await getSqlJs(),ab=await(await h[0].getFile()).arrayBuffer(),db=new SQL.Database(new Uint8Array(ab));
+    var tbls=db.exec('SELECT table_name, geometry_type_name FROM gpkg_geometry_columns');
+    if(!tbls.length||!tbls[0].values.length){alert('GPKG \u7121\u5E7E\u4F55\u5716\u5C64');db.close();return;}
+    var ptC=0,parC=0;
+    for(var t=0;t<tbls[0].values.length;t++) {
+      var tn=tbls[0].values[t][0],gt=tbls[0].values[t][1],rows=db.exec('SELECT geom, * FROM "'+tn+'" LIMIT 5000');
+      if(!rows.length) continue; var cols=rows[0].columns;
+      if(gt.toUpperCase()==='POINT') {
+        var f=[]; rows[0].values.forEach(function(r){try{var g=r[0];if(!g||g.byteLength<40)return;var dv=new DataView(g.buffer||g),ll=twd97toWgs84(dv.getFloat64(40,true),dv.getFloat64(32,true));if(!isFinite(ll[0]))return;var p={};for(var ci=1;ci<cols.length;ci++){if(cols[ci]!=='geom')p[cols[ci]]=r[ci];}f.push({type:'Feature',geometry:{type:'Point',coordinates:ll},properties:p});ptC++;}catch(e){}});
+        if(f.length){_mapData.pt=f;renderGeoJSON('pt',f,'#ff6b6b','circle');}
+      } else if(gt.toUpperCase()==='POLYGON') {
+        var f=[]; rows[0].values.forEach(function(r){try{var g=r[0];if(!g||g.byteLength<40)return;var dv=new DataView(g.buffer||g),nr=dv.getUint32(40,true),np=dv.getUint32(44,true),coords=[];for(var pi=0;pi<np&&pi<200;pi++){var ll=twd97toWgs84(dv.getFloat64(48+pi*16,true),dv.getFloat64(48+pi*16+8,true));if(isFinite(ll[0]))coords.push(ll);}if(coords.length<3)return;var p={};for(var ci=1;ci<cols.length;ci++){if(cols[ci]!=='geom')p[cols[ci]]=r[ci];}f.push({type:'Feature',geometry:{type:'Polygon',coordinates:[coords]},properties:p});parC++;}catch(e){}});
+        if(f.length){_mapData.par=f;renderGeoJSON('par',f,'#00ff88','polygon');}
+      }
+    }
+    db.close(); fitMapBounds(); document.getElementById('map-info').textContent='\u754C\u5740\u9EDE '+ptC+' \u00B7 \u5B97\u5730 '+parC;
+  } catch(e){if(e.name!=='AbortError')alert('\u8A80\u53D6 GPKG \u5931\u6557: '+e.message);}
+};
+window.mapLoadKML = async function() {
+  try {
+    var h=await window.showOpenFilePicker({types:[{description:'KML',accept:{'application/vnd.google-earth.kml+xml':['.kml']}}]});
+    initMap(); clearMap();
+    var doc=new DOMParser().parseFromString(await(await h[0].getFile()).text(),'text/xml'),pms=doc.querySelectorAll('Placemark');
+    if(!pms.length){alert('KML \u627E\u4E0D\u5230\u5730\u6A19');return;}
+    var f=[]; pms.forEach(function(pm){var n=(pm.querySelector('name')||{}).textContent||'',ct=(pm.querySelector('coordinates')||{}).textContent;if(!ct)return;var p=ct.trim().split(',').map(Number);if(p.length<2||!isFinite(p[0])||!isFinite(p[1]))return;f.push({type:'Feature',geometry:{type:'Point',coordinates:[p[0],p[1]]},properties:{name:n,id:n}});});
+    if(f.length){_mapData.par=f;renderGeoJSON('par',f,'#00ff88','marker');fitMapBounds();}
+    document.getElementById('map-info').textContent=f.length+' \u500B\u5730\u6A19';
+  } catch(e){if(e.name!=='AbortError')alert('\u8A80\u53D6 KML \u5931\u6557: '+e.message);}
+};
+window.mapToggleLayer = function() {
+  document.querySelectorAll('.map-layer').forEach(function(cb){var l=_mapLayers[cb.dataset.layer];if(l){if(cb.checked)_map.addLayer(l);else _map.removeLayer(l);}});
+};
+var _origSwitchTab = switchTab;
+switchTab = function(btn, name) {
+  _origSwitchTab(btn, name);
+  if (name === 'map') { setTimeout(function() { initMap(); if (_map) _map.invalidateSize(); }, 100); }
+};
+
 </script>
 </body>
 </html>
