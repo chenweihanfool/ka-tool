@@ -1188,23 +1188,135 @@ async function readDBF(fileHandle) {
   return { fields, records };
 }
 
-// ── QGZ (gzip) decompressor / compressor ─────────────────────────────────────
-async function decompressGzip(ab) {
-  const ds = new DecompressionStream('gzip');
-  const w = ds.writable.getWriter(); const r = ds.readable.getReader();
-  w.write(new Uint8Array(ab)); w.close();
-  const chunks = []; while (true) { const {done,value}=await r.read(); if(done)break; chunks.push(value); }
-  const total = chunks.reduce((s,c)=>s+c.length,0);
-  const out = new Uint8Array(total); let o=0; for(const c of chunks){out.set(c,o);o+=c.length;}
-  return new TextDecoder('utf-8').decode(out);
+// ── QGZ (ZIP) decompressor / compressor ──────────────────────────────────────
+// QGZ 是 ZIP 格式（內含 qgis.qgs），不是 GZIP！
+// 使用純 JS 實作 ZIP，不需外部函式庫
+function crc32(data) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < data.length; i++) {
+    crc ^= data[i];
+    for (let j = 0; j < 8; j++) crc = (crc >>> 1) ^ (crc & 1 ? 0xEDB88320 : 0);
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
 }
-async function compressGzip(str) {
-  const cs = new CompressionStream('gzip');
+function u8(s) { return new TextEncoder().encode(s); }
+function u32(v) { const b=new Uint8Array(4); new DataView(b.buffer).setUint32(0,v,true); return b; }
+function u16(v) { const b=new Uint8Array(2); new DataView(b.buffer).setUint16(0,v,true); return b; }
+
+// ZIP 解壓：取出 qgis.qgs 的內容
+async function decompressZip(ab) {
+  const data = new Uint8Array(ab);
+  // 找 End of Central Directory (EOCD) signature 0x06054b50
+  let eocd = -1;
+  for (let i = data.length - 22; i >= 0; i--) {
+    if (data[i]===0x50 && data[i+1]===0x4B && data[i+2]===0x05 && data[i+3]===0x06) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('不是有效的 ZIP 檔');
+  const cdOff = new DataView(data.buffer, eocd + 16, 4).getUint32(0, true);
+  const cdEntries = new DataView(data.buffer, eocd + 8, 2).getUint16(0, true);
+  // 掃描 Central Directory，找 qgis.qgs
+  let pos = cdOff;
+  for (let e = 0; e < cdEntries; e++) {
+    const sig = new DataView(data.buffer, pos, 4).getUint32(0, true);
+    if (sig !== 0x02014b50) break;
+    const fnameLen = new DataView(data.buffer, pos + 28, 2).getUint16(0, true);
+    const extraLen = new DataView(data.buffer, pos + 30, 2).getUint16(0, true);
+    const commLen  = new DataView(data.buffer, pos + 32, 2).getUint16(0, true);
+    const localOff = new DataView(data.buffer, pos + 42, 4).getUint32(0, true);
+    const fname = new TextDecoder().decode(data.subarray(pos + 46, pos + 46 + fnameLen));
+    if (fname === 'qgis.qgs') {
+      // 讀 local file header
+      const lhdr = localOff;
+      const fnameLenL = new DataView(data.buffer, lhdr + 26, 2).getUint16(0, true);
+      const extraLenL = new DataView(data.buffer, lhdr + 28, 2).getUint16(0, true);
+      const compMeth  = new DataView(data.buffer, lhdr + 8, 2).getUint16(0, true);
+      const compSize  = new DataView(data.buffer, lhdr + 18, 4).getUint32(0, true);
+      const uncomSize = new DataView(data.buffer, lhdr + 22, 4).getUint32(0, true);
+      const dataOff = lhdr + 30 + fnameLenL + extraLenL;
+      let raw = data.subarray(dataOff, dataOff + (compSize || uncomSize));
+      if (compMeth === 8) { // Deflate
+        const ds = new DecompressionStream('deflate-raw');
+        const w = ds.writable.getWriter(); const r = ds.readable.getReader();
+        w.write(raw); w.close();
+        const chunks = []; while(true){const{done,value}=await r.read();if(done)break;chunks.push(value);}
+        const total = chunks.reduce((s,c)=>s+c.length,0);
+        const out = new Uint8Array(total); let o=0;
+        for (const c of chunks) { out.set(c,o); o+=c.length; }
+        return new TextDecoder().decode(out);
+      }
+      return new TextDecoder().decode(raw);
+    }
+    pos += 46 + fnameLen + extraLen + commLen;
+  }
+  throw new Error('ZIP 中找不到 qgis.qgs');
+}
+
+// ZIP 壓縮：建立內含 qgis.qgs 的 ZIP
+async function compressToZip(qgsStr) {
+  const filedata = u8(qgsStr);
+  const crc = crc32(filedata);
+  const fname = u8('qgis.qgs');
+  // 先 deflate 壓縮
+  const cs = new CompressionStream('deflate-raw');
   const w = cs.writable.getWriter(); const r = cs.readable.getReader();
-  w.write(new TextEncoder().encode(str)); w.close();
-  const chunks=[]; while(true){const{done,value}=await r.read();if(done)break;chunks.push(value);}
-  const total=chunks.reduce((s,c)=>s+c.length,0);
-  const out=new Uint8Array(total);let o=0;for(const c of chunks){out.set(c,o);o+=c.length;}
+  w.write(filedata); w.close();
+  const chunks = []; while(true){const{done,value}=await r.read();if(done)break;chunks.push(value);}
+  const total = chunks.reduce((s,c)=>s+c.length,0);
+  const comp = new Uint8Array(total); let o=0;
+  for (const c of chunks) { comp.set(c,o); o+=c.length; }
+  // Local file header
+  const lh = new Uint8Array(30 + fname.length);
+  lh.set([0x50,0x4B,0x03,0x04], 0);            // signature
+  lh.set([20,0], 4);                              // version needed
+  lh.set([8,0], 6);                               // flags (utf-8)
+  lh.set([8,0], 8);                               // compression: deflate
+  lh.set(u16(0), 10);                             // mod time
+  lh.set(u16(0), 12);                             // mod date
+  lh.set(u32(crc), 14);                           // crc32
+  lh.set(u32(comp.length), 18);                   // compressed size
+  lh.set(u32(filedata.length), 22);               // uncompressed size
+  lh.set(u16(fname.length), 26);                  // filename length
+  lh.set(u16(0), 28);                              // extra length
+  lh.set(fname, 30);
+  // Central directory entry
+  const cd = new Uint8Array(46 + fname.length);
+  let ci = 0;
+  cd.set([0x50,0x4B,0x01,0x02], ci); ci+=4;       // signature
+  cd.set([20,0], ci); ci+=2;                        // version made by
+  cd.set([20,0], ci); ci+=2;                        // version needed
+  cd.set([8,0], ci); ci+=2;                          // flags
+  cd.set([8,0], ci); ci+=2;                          // compression
+  cd.set(u16(0), ci); ci+=2;                          // mod time
+  cd.set(u16(0), ci); ci+=2;                          // mod date
+  cd.set(u32(crc), ci); ci+=4;                        // crc32
+  cd.set(u32(comp.length), ci); ci+=4;                // comp size
+  cd.set(u32(filedata.length), ci); ci+=4;            // uncomp size
+  cd.set(u16(fname.length), ci); ci+=2;               // fname len
+  cd.set(u16(0), ci); ci+=2;                           // extra len
+  cd.set(u16(0), ci); ci+=2;                           // comment len
+  cd.set(u16(0), ci); ci+=2;                           // disk
+  cd.set(u16(0), ci); ci+=2;                           // internal attrs
+  cd.set(u32(0), ci); ci+=4;                           // external attrs
+  cd.set(u32(0), ci); ci+=4;                           // local header offset
+  cd.set(fname, ci);
+  // End of Central Directory
+  const eocdSize = 22;
+  const eocd = new Uint8Array(eocdSize);
+  ei = 0;
+  eocd.set([0x50,0x4B,0x05,0x06], ei); ei+=4;
+  eocd.set(u16(0), ei); ei+=2;         // disk
+  eocd.set(u16(0), ei); ei+=2;         // disk of CD
+  eocd.set(u16(1), ei); ei+=2;         // entries on disk
+  eocd.set(u16(1), ei); ei+=2;         // total entries
+  eocd.set(u32(cd.length), ei); ei+=4; // CD size
+  eocd.set(u32(lh.length + comp.length), ei); ei+=4; // CD offset
+  eocd.set(u16(0), ei);                // comment length
+  // Combine
+  const out = new Uint8Array(lh.length + comp.length + cd.length + eocd.length);
+  o = 0; out.set(lh, o); o+=lh.length;
+  out.set(comp, o); o+=comp.length;
+  out.set(cd, o); o+=cd.length;
+  out.set(eocd, o);
   return out;
 }
 
@@ -1504,7 +1616,7 @@ window.downloadQGZ = async function() {
     if (_qgzFile) {
       // 既有 QGZ：解壓 → 疊加新圖層 → 重新壓縮
       const ab = await (await _qgzFile.getFile()).arrayBuffer();
-      const existingQgs = await decompressGzip(ab);
+      const existingQgs = await decompressZip(ab);
       qgsStr = patchQGS(existingQgs, groupLabel, layerSpecs, `./${gpkgName}`);
       outName = _qgzFile.name.replace(/\.(qgz|qgs)$/i, '') + `_${_sCaseId}_${_sSurveyDate}.qgz`;
     } else {
@@ -1514,7 +1626,7 @@ window.downloadQGZ = async function() {
       outName = `${_sCaseId}_${_sSurveyDate}.qgz`;
     }
 
-    const qgzBuf = await compressGzip(qgsStr);
+    const qgzBuf = await compressToZip(qgsStr);
     triggerDownload(new Blob([qgzBuf], {type:'application/x-qgis'}), outName);
   } catch(e) {
     alert('下載 QGZ 失敗：' + e.message);
