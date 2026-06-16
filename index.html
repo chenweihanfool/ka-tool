@@ -1809,9 +1809,10 @@ window.mapLoadSurvey = function() {
 };
 window.mapLoadGPKG = async function() {
   try {
-    var h=await window.showOpenFilePicker({types:[{description:'GeoPackage',accept:{'application/geopackage+sqlite3':['.gpkg']}}]});
-    initMap(); clearMap();
-    var SQL=await getSqlJs(),ab=await(await h[0].getFile()).arrayBuffer(),db=new SQL.Database(new Uint8Array(ab));
+    var inp=document.createElement('input');inp.type='file';inp.accept='.gpkg';
+    var f=await new Promise(function(r){inp.onchange=function(){r(inp.files[0])};inp.click();});
+    if(!f)return;initMap();clearMap();
+    var SQL=await getSqlJs(),ab=await f.arrayBuffer(),db=new SQL.Database(new Uint8Array(ab));
     var tbls=db.exec('SELECT table_name, geometry_type_name FROM gpkg_geometry_columns');
     if(!tbls.length||!tbls[0].values.length){alert('GPKG \u7121\u5E7E\u4F55\u5716\u5C64');db.close();return;}
     var ptC=0,parC=0;
@@ -1831,9 +1832,10 @@ window.mapLoadGPKG = async function() {
 };
 window.mapLoadKML = async function() {
   try {
-    var h=await window.showOpenFilePicker({types:[{description:'KML',accept:{'application/vnd.google-earth.kml+xml':['.kml']}}]});
-    initMap(); clearMap();
-    var doc=new DOMParser().parseFromString(await(await h[0].getFile()).text(),'text/xml'),pms=doc.querySelectorAll('Placemark');
+    var inp=document.createElement('input');inp.type='file';inp.accept='.kml';
+    var f=await new Promise(function(r){inp.onchange=function(){r(inp.files[0])};inp.click();});
+    if(!f)return;initMap();clearMap();
+    var doc=new DOMParser().parseFromString(await f.text(),'text/xml'),pms=doc.querySelectorAll('Placemark');
     if(!pms.length){alert('KML \u627E\u4E0D\u5230\u5730\u6A19');return;}
     var f=[]; pms.forEach(function(pm){var n=(pm.querySelector('name')||{}).textContent||'',ct=(pm.querySelector('coordinates')||{}).textContent;if(!ct)return;var p=ct.trim().split(',').map(Number);if(p.length<2||!isFinite(p[0])||!isFinite(p[1]))return;f.push({type:'Feature',geometry:{type:'Point',coordinates:[p[0],p[1]]},properties:{name:n,id:n}});});
     if(f.length){_mapData.par=f;renderGeoJSON('par',f,'#00ff88','marker');fitMapBounds();}
