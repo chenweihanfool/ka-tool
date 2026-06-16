@@ -211,6 +211,7 @@
         <button class="primary" onclick="downloadMarkedGPKG()">⬇ 下載 GPKG</button>
         <button class="primary" onclick="downloadCoordTxt()">⬇ 座標 TXT（經緯儀/GPS）</button>
         <button onclick="downloadGoogleKML()">📍 下載 KML（Google My Maps）</button>
+        <button class="primary" onclick="navigateParcel()" style="background:#28a745;border-color:#1e7e34">🚗 導航到選取地號</button>
       </div>
     </div>
 
@@ -1377,6 +1378,22 @@ function calcParcelCentroid(sec, m, c) {
   }
   return count ? { x: sumX / count, y: sumY / count } : null; // TWD97 {x=E, y=N}
 }
+
+// ── 導航到選取地號 ─────────────────────────────────────────────────────────────
+window.navigateParcel = function() {
+  const sel  = document.getElementById('parcel-select');
+  const vals = [...sel.selectedOptions].map(o => o.value);
+  if (!vals.length) { alert('請先選擇一個地號'); return; }
+  // 只取第一個選取地號
+  const val = vals[0];
+  const [sec, m, c] = val.split(',').map(Number);
+  const cent = calcParcelCentroid(sec, m, c);
+  if (!cent) { alert('無法計算該地號中心點'); return; }
+  const ll = twd97toWgs84(cent.x, cent.y);
+  if (!isFinite(ll[0])) { alert('座標轉換失敗'); return; }
+  const label = encodeURIComponent(sel.selectedOptions[0].textContent.trim());
+  window.open(`https://www.google.com/maps/dir/?api=1&destination=${ll[1]},${ll[0]}&travelmode=driving`, '_blank');
+};
 
 // ── 輸出 Google My Maps KML ───────────────────────────────────────────────────
 function downloadGoogleKML() {
