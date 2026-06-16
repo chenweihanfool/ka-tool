@@ -1215,6 +1215,24 @@ function patchQGS(xmlStr, groupLabel, layerSpecs, gpkgRelPath) {
   const parser = new DOMParser();
   const doc = parser.parseFromString(xmlStr, 'text/xml');
 
+  // ── 收集既有圖層樣式（供新圖層複製）──
+  const styleCache = {};
+  for (const ml of doc.querySelectorAll('maplayer')) {
+    const name = (ml.querySelector('layername') || {}).textContent || '';
+    if (!name) continue;
+    const renderer = ml.querySelector('renderer-v2');
+    if (!renderer) continue;
+    const key = name + '|' + ml.getAttribute('geometry');
+    if (styleCache[key]) continue;
+    styleCache[key] = {
+      renderer: renderer.cloneNode(true),
+      pipe: (ml.querySelector('pipe') || {}).cloneNode ? ml.querySelector('pipe').cloneNode(true) : null,
+      customProps: (ml.querySelector('customproperties') || {}).cloneNode ? ml.querySelector('customproperties').cloneNode(true) : null,
+      editTypes: (ml.querySelector('fieldConfiguration') || {}).cloneNode ? ml.querySelector('fieldConfiguration').cloneNode(true) : null,
+      label: (ml.querySelector('labeling') || {}).cloneNode ? ml.querySelector('labeling').cloneNode(true) : null,
+    };
+  }
+
   // Add maplayer entries
   const projLayers = doc.querySelector('projectlayers');
   if (projLayers) {
@@ -1225,6 +1243,18 @@ function patchQGS(xmlStr, groupLabel, layerSpecs, gpkgRelPath) {
       ml.setAttribute('autoRefreshEnabled', '0');
       const srsXml = `<srs><spatialrefsys nativeFormat="Wkt"><authid>EPSG:3826</authid><description>TWD97 / TM2 zone 121</description></spatialrefsys></srs>`;
       ml.innerHTML = `<id>${lyr.id}</id><datasource>${gpkgRelPath}|layername=${lyr.tableName}</datasource><layername>${lyr.name}</layername>${srsXml}<geometrytype>${geomMap[lyr.geomType]||'Point'}</geometrytype>`;
+
+      // 複製既有同名圖層的樣式
+      const cacheKey = lyr.name + '|' + (geomMap[lyr.geomType] || 'Point');
+      const cached = styleCache[cacheKey];
+      if (cached) {
+        if (cached.renderer)    ml.appendChild(cached.renderer.cloneNode(true));
+        if (cached.pipe)        ml.appendChild(cached.pipe.cloneNode(true));
+        if (cached.customProps) ml.appendChild(cached.customProps.cloneNode(true));
+        if (cached.editTypes)   ml.appendChild(cached.editTypes.cloneNode(true));
+        if (cached.label)       ml.appendChild(cached.label.cloneNode(true));
+      }
+
       projLayers.appendChild(ml);
     }
   }
