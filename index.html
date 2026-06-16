@@ -186,6 +186,7 @@
     <div class="card" id="survey-result-section" hidden>
       <h2>處理結果</h2>
       <div class="dl-group" id="survey-dl-btns"></div>
+      <div style="margin-top:8px;font-size:12px;color:#888">⬇ 先下載 GPKG 和 QGZ 到同一個資料夾，在 QGIS 中開 QGZ 檔即可</div>
     </div>
 
     <div class="card" id="survey-parcel-section" hidden>
@@ -212,6 +213,7 @@
         <button class="primary" onclick="downloadCoordTxt()">⬇ 座標 TXT（經緯儀/GPS）</button>
         <button onclick="downloadGoogleKML()">📍 下載 KML（Google My Maps）</button>
         <button class="primary" onclick="navigateParcel()" style="background:#28a745;border-color:#1e7e34">🚗 導航到選取地號</button>
+        <button class="primary" onclick="downloadQGZ()" style="background:#6f42c1;border-color:#5a32a3">⬇ 下載 QGZ（QGIS 專案）</button>
       </div>
     </div>
 
@@ -1395,6 +1397,73 @@ window.navigateParcel = function() {
   window.open(`https://www.google.com/maps/dir/?api=1&destination=${ll[1]},${ll[0]}&travelmode=driving`, '_blank');
 };
 
+// ── QGZ 專案產生 ─────────────────────────────────────────────────────────────
+function generateBaseQGS(projectName) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<qgis projectname="${projectName.replace(/"/g,'&quot;')}" version="3.30.0">
+  <title>${projectName.replace(/"/g,'&quot;')}</title>
+  <autotransaction>0</autotransaction>
+  <mapcanvas>
+    <extent><xmin>0</xmin><ymin>0</ymin><xmax>1000</xmax><ymax>1000</ymax></extent>
+    <units>m</units>
+    <projections>1</projections>
+  </mapcanvas>
+  <projectlayers layercount="0"/>
+  <layer-tree-group checked="Qt::Checked" expanded="1" name="">
+    <customproperties/>
+  </layer-tree-group>
+  <properties>
+    <Gui>
+      <CanvasColorRedPart><![CDATA[255]]></CanvasColorRedPart>
+      <CanvasColorGreenPart><![CDATA[255]]></CanvasColorGreenPart>
+      <CanvasColorBluePart><![CDATA[255]]></CanvasColorBluePart>
+    </Gui>
+    <PositionPrecision>
+      <DecimalPlaces><![CDATA[3]]></DecimalPlaces>
+      <Automatic><![CDATA[true]]></Automatic>
+    </PositionPrecision>
+    <SpatialRefSys>
+      <ProjectCRSID><![CDATA[3826]]></ProjectCRSID>
+      <ProjectCrs><authid><![CDATA[EPSG:3826]]></authid></ProjectCrs>
+      <ProjectCrsProj4String><![CDATA[+proj=tmerc +lat_0=0 +lon_0=121 +k=0.9999 +x_0=250000 +y_0=0 +ellps=GRS80 +units=m +no_defs]]></ProjectCrsProj4String>
+    </SpatialRefSys>
+    <Measure><DistanceUnits><![CDATA[meters]]></DistanceUnits></Measure>
+    <Macros/><WMS/>
+  </properties>
+</qgis>`;
+}
+
+window.downloadQGZ = async function() {
+  if (!_sLastLayerDefs || !_sLastLayerDefs.length) { alert('請先執行複丈資料處理'); return; }
+  if (!_sLastGpkgName) { alert('請先按「⬇ 下載 GPKG」產生 GPKG 檔'); return; }
+
+  const gpkgName  = _sLastGpkgName;
+  const groupLabel = `${_sCaseId} (${_sSurveyDate})`;
+
+  // Build layer specs for patchQGS
+  const layerSpecs = [];
+  const seenNames = new Set();
+  for (const d of _sLastLayerDefs) {
+    let name = d.name;
+    let uname = name;
+    let n = 1;
+    while (seenNames.has(uname)) uname = name + '_' + (n++);
+    seenNames.add(uname);
+    layerSpecs.push({
+      id: newLayerId(uname.replace(/[^a-zA-Z0-9]/g,'_')),
+      name: uname,
+      geomType: d.geomType,
+      tableName: uname,
+    });
+  }
+
+  // Generate base QGS, patch it, compress to QGZ
+  const base = generateBaseQGS(_sCaseId);
+  const qgsStr = patchQGS(base, groupLabel, layerSpecs, `./${gpkgName}`);
+  const qgzBuf = await compressGzip(qgsStr);
+  triggerDownload(new Blob([qgzBuf], {type:'application/x-qgis'}), `${_sCaseId}_${_sSurveyDate}.qgz`);
+};
+
 // ── 輸出 Google My Maps KML ───────────────────────────────────────────────────
 function downloadGoogleKML() {
   const sel  = document.getElementById('parcel-select');
@@ -1754,6 +1823,27 @@ async function runSurvey() {
 
     sProg(100, '完成！請選擇地號後下載 GPKG');
     document.getElementById('survey-result-section').hidden = false;
+    // 填入處理結果的下載按鈕
+    const dlBtns = document.getElementById('survey-dl-btns');
+    dlBtns.innerHTML = '';
+    function addBtn(cls, label, fn, bg) {
+      const b = document.createElement('button');
+      b.className = cls || 'primary';
+      b.textContent = label;
+      b.onclick = fn;
+      if (bg) b.style.cssText = 'background:'+bg+';border-color:#fff;color:#fff';
+      dlBtns.appendChild(b);
+    }
+    addBtn('primary', '⬇ 下載 GPKG（地籍圖）', async () => {
+      const gpkgBtn = document.getElementById('survey-gpkg-btn');
+      try {
+        await buildAndDownloadGPKG(_sLastGpkgName, _sLastLayerDefs);
+        if (gpkgBtn) gpkgBtn.textContent = `⬇ ${_sLastGpkgName} ✅`;
+      } catch(e) { if (gpkgBtn) gpkgBtn.textContent = '❌ '+e.message; }
+    }, '#1a5cb8');
+    addBtn('primary', '⬇ 下載 QGZ（QGIS 專案）', downloadQGZ, '#6f42c1');
+    addBtn('', '⬇ GPKG（選取地號）', downloadMarkedGPKG, '#1a5cb8');
+    addBtn('', '📍 KML（Google Maps）', downloadGoogleKML, '');
     populateParcelSelect(d2b.length ? d2b : []);
 
   } catch(e) {
