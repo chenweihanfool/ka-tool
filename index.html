@@ -163,6 +163,15 @@
     </div>
 
     <div class="card">
+      <h2 style="font-size:13px">QGIS 專案（選填）</h2>
+      <div class="step-row">
+        <button onclick="pickQGZFile()" id="btnPickQGZ">📂 選擇既有 QGZ 專案…</button>
+        <span id="lblQGZ" style="font-size:12px;color:#888">未選擇（將建立全新專案）</span>
+      </div>
+      <p style="font-size:11px;color:#999;margin-top:6px">選擇你現有的 QGIS 專案檔，新 GPKG 圖層會疊加到該專案的「複丈歷史」群組</p>
+    </div>
+
+    <div class="card">
       <h2>步驟 2 — 輸出項目</h2>
       <div class="check-group">
         <label><input type="checkbox" id="surv-chk-pts" checked> 界址點（D14）</label>
@@ -1274,6 +1283,7 @@ let _sCaseId      = '';
 let _sSurveyDate  = '';          // 放樣日期（使用者輸入）
 let _sLastLayerDefs = null;      // 最後一次 runSurvey 產生的 layerDefs（供重新匯出用）
 let _sLastGpkgName  = '';        // 最後一次輸出的 GPKG 檔名
+let _qgzFile = null;             // 使用者選擇的既有 QGZ 專案檔
 
 // ── 地號選擇器 ────────────────────────────────────────────────────────────────
 // 從 D2B 建立地號清單（直接記錄宗地邊界點，比走 D21 拓撲更可靠）
@@ -1457,11 +1467,24 @@ window.downloadQGZ = async function() {
     });
   }
 
-  // Generate base QGS, patch it, compress to QGZ
-  const base = generateBaseQGS(_sCaseId);
-  const qgsStr = patchQGS(base, groupLabel, layerSpecs, `./${gpkgName}`);
+  let qgsStr;
+  let outName;
+
+  if (_qgzFile) {
+    // 既有 QGZ：解壓 → 疊加新圖層 → 重新壓縮
+    const ab = await (await _qgzFile.getFile()).arrayBuffer();
+    const existingQgs = await decompressGzip(ab);
+    qgsStr = patchQGS(existingQgs, groupLabel, layerSpecs, `./${gpkgName}`);
+    outName = _qgzFile.name.replace(/\.(qgz|qgs)$/i, '') + `_${_sCaseId}_${_sSurveyDate}.qgz`;
+  } else {
+    // 無既有 QGZ：建立全新專案
+    const base = generateBaseQGS(_sCaseId);
+    qgsStr = patchQGS(base, groupLabel, layerSpecs, `./${gpkgName}`);
+    outName = `${_sCaseId}_${_sSurveyDate}.qgz`;
+  }
+
   const qgzBuf = await compressGzip(qgsStr);
-  triggerDownload(new Blob([qgzBuf], {type:'application/x-qgis'}), `${_sCaseId}_${_sSurveyDate}.qgz`);
+  triggerDownload(new Blob([qgzBuf], {type:'application/x-qgis'}), outName);
 };
 
 // ── 輸出 Google My Maps KML ───────────────────────────────────────────────────
