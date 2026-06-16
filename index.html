@@ -1206,6 +1206,16 @@ function u16(v) { const b=new Uint8Array(2); new DataView(b.buffer).setUint16(0,
 // ZIP 解壓：取出 qgis.qgs 的內容
 async function decompressZip(ab) {
   const data = new Uint8Array(ab);
+  // 先檢查是不是 GZIP 格式（舊版 QGZ < QGIS 3.30）
+  if (data[0] === 0x1F && data[1] === 0x8B) {
+    const ds = new DecompressionStream('gzip');
+    const w = ds.writable.getWriter(); const r = ds.readable.getReader();
+    w.write(data); w.close();
+    const chunks = []; while (true) { const {done,value}=await r.read(); if(done)break; chunks.push(value); }
+    const total = chunks.reduce((s,c)=>s+c.length,0);
+    const out = new Uint8Array(total); let o=0; for(const c of chunks){out.set(c,o);o+=c.length;}
+    return new TextDecoder('utf-8').decode(out);
+  }
   // 找 End of Central Directory (EOCD) signature 0x06054b50
   let eocd = -1;
   for (let i = data.length - 22; i >= 0; i--) {
@@ -1214,8 +1224,9 @@ async function decompressZip(ab) {
   if (eocd < 0) throw new Error('不是有效的 ZIP 檔');
   const cdOff = new DataView(data.buffer, eocd + 16, 4).getUint32(0, true);
   const cdEntries = new DataView(data.buffer, eocd + 8, 2).getUint16(0, true);
-  // 掃描 Central Directory，找 qgis.qgs
+  // 掃描 Central Directory，找 qgis.qgs（也接受 qgis.qgs 以外的 .qgs 檔）
   let pos = cdOff;
+  let found = null;
   for (let e = 0; e < cdEntries; e++) {
     const sig = new DataView(data.buffer, pos, 4).getUint32(0, true);
     if (sig !== 0x02014b50) break;
@@ -1224,31 +1235,32 @@ async function decompressZip(ab) {
     const commLen  = new DataView(data.buffer, pos + 32, 2).getUint16(0, true);
     const localOff = new DataView(data.buffer, pos + 42, 4).getUint32(0, true);
     const fname = new TextDecoder().decode(data.subarray(pos + 46, pos + 46 + fnameLen));
-    if (fname === 'qgis.qgs') {
-      // 讀 local file header
-      const lhdr = localOff;
-      const fnameLenL = new DataView(data.buffer, lhdr + 26, 2).getUint16(0, true);
-      const extraLenL = new DataView(data.buffer, lhdr + 28, 2).getUint16(0, true);
-      const compMeth  = new DataView(data.buffer, lhdr + 8, 2).getUint16(0, true);
-      const compSize  = new DataView(data.buffer, lhdr + 18, 4).getUint32(0, true);
-      const uncomSize = new DataView(data.buffer, lhdr + 22, 4).getUint32(0, true);
-      const dataOff = lhdr + 30 + fnameLenL + extraLenL;
-      let raw = data.subarray(dataOff, dataOff + (compSize || uncomSize));
-      if (compMeth === 8) { // Deflate
-        const ds = new DecompressionStream('deflate-raw');
-        const w = ds.writable.getWriter(); const r = ds.readable.getReader();
-        w.write(raw); w.close();
-        const chunks = []; while(true){const{done,value}=await r.read();if(done)break;chunks.push(value);}
-        const total = chunks.reduce((s,c)=>s+c.length,0);
-        const out = new Uint8Array(total); let o=0;
-        for (const c of chunks) { out.set(c,o); o+=c.length; }
-        return new TextDecoder().decode(out);
-      }
-      return new TextDecoder().decode(raw);
-    }
+    // 優先找 qgis.qgs，其次找任何 .qgs 檔
+    if (fname === 'qgis.qgs') { found = { e, fname, localOff, fnameLen, extraLen, commLen }; break; }
+    if (!found && fname.endsWith('.qgs')) found = { e, fname, localOff, fnameLen, extraLen, commLen };
     pos += 46 + fnameLen + extraLen + commLen;
   }
-  throw new Error('ZIP 中找不到 qgis.qgs');
+  if (!found) throw new Error('ZIP 中找不到 .qgs 專案檔');
+  // 讀 local file header
+  const lhdr = found.localOff;
+  const fnameLenL = new DataView(data.buffer, lhdr + 26, 2).getUint16(0, true);
+  const extraLenL = new DataView(data.buffer, lhdr + 28, 2).getUint16(0, true);
+  const compMeth  = new DataView(data.buffer, lhdr + 8, 2).getUint16(0, true);
+  const compSize  = new DataView(data.buffer, lhdr + 18, 4).getUint32(0, true);
+  const uncomSize = new DataView(data.buffer, lhdr + 22, 4).getUint32(0, true);
+  const dataOff = lhdr + 30 + fnameLenL + extraLenL;
+  let raw = data.subarray(dataOff, dataOff + (compSize || uncomSize));
+  if (compMeth === 8) { // Deflate
+    const ds = new DecompressionStream('deflate-raw');
+    const w = ds.writable.getWriter(); const r = ds.readable.getReader();
+    w.write(raw); w.close();
+    const chunks = []; while(true){const{done,value}=await r.read();if(done)break;chunks.push(value);}
+    const total = chunks.reduce((s,c)=>s+c.length,0);
+    const out = new Uint8Array(total); let o=0;
+    for (const c of chunks) { out.set(c,o); o+=c.length; }
+    return new TextDecoder().decode(out);
+  }
+  return new TextDecoder().decode(raw);
 }
 
 // ZIP 壓縮：建立內含 qgis.qgs 的 ZIP
