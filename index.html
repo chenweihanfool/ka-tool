@@ -1474,47 +1474,52 @@ function generateBaseQGS(projectName) {
 }
 
 window.downloadQGZ = async function() {
-  if (!_sLastLayerDefs || !_sLastLayerDefs.length) { alert('請先執行複丈資料處理'); return; }
-  if (!_sLastGpkgName) { alert('請先按「⬇ 下載 GPKG」產生 GPKG 檔'); return; }
+  try {
+    if (!_sLastLayerDefs || !_sLastLayerDefs.length) { alert('請先執行複丈資料處理'); return; }
+    if (!_sLastGpkgName) { alert('請先按「⬇ 下載 GPKG」產生 GPKG 檔'); return; }
 
-  const gpkgName  = _sLastGpkgName;
-  const groupLabel = `${_sCaseId} (${_sSurveyDate})`;
+    const gpkgName  = _sLastGpkgName;
+    const groupLabel = `${_sCaseId} (${_sSurveyDate})`;
 
-  // Build layer specs for patchQGS
-  const layerSpecs = [];
-  const seenNames = new Set();
-  for (const d of _sLastLayerDefs) {
-    let name = d.name;
-    let uname = name;
-    let n = 1;
-    while (seenNames.has(uname)) uname = name + '_' + (n++);
-    seenNames.add(uname);
-    layerSpecs.push({
-      id: newLayerId(uname.replace(/[^a-zA-Z0-9]/g,'_')),
-      name: uname,
-      geomType: d.geomType,
-      tableName: uname,
-    });
+    // Build layer specs for patchQGS
+    const layerSpecs = [];
+    const seenNames = new Set();
+    for (const d of _sLastLayerDefs) {
+      let name = d.name;
+      let uname = name;
+      let n = 1;
+      while (seenNames.has(uname)) uname = name + '_' + (n++);
+      seenNames.add(uname);
+      layerSpecs.push({
+        id: newLayerId(uname.replace(/[^a-zA-Z0-9]/g,'_')),
+        name: uname,
+        geomType: d.geomType,
+        tableName: uname,
+      });
+    }
+
+    let qgsStr;
+    let outName;
+
+    if (_qgzFile) {
+      // 既有 QGZ：解壓 → 疊加新圖層 → 重新壓縮
+      const ab = await (await _qgzFile.getFile()).arrayBuffer();
+      const existingQgs = await decompressGzip(ab);
+      qgsStr = patchQGS(existingQgs, groupLabel, layerSpecs, `./${gpkgName}`);
+      outName = _qgzFile.name.replace(/\.(qgz|qgs)$/i, '') + `_${_sCaseId}_${_sSurveyDate}.qgz`;
+    } else {
+      // 無既有 QGZ：建立全新專案
+      const base = generateBaseQGS(_sCaseId);
+      qgsStr = patchQGS(base, groupLabel, layerSpecs, `./${gpkgName}`);
+      outName = `${_sCaseId}_${_sSurveyDate}.qgz`;
+    }
+
+    const qgzBuf = await compressGzip(qgsStr);
+    triggerDownload(new Blob([qgzBuf], {type:'application/x-qgis'}), outName);
+  } catch(e) {
+    alert('下載 QGZ 失敗：' + e.message);
+    console.error(e);
   }
-
-  let qgsStr;
-  let outName;
-
-  if (_qgzFile) {
-    // 既有 QGZ：解壓 → 疊加新圖層 → 重新壓縮
-    const ab = await (await _qgzFile.getFile()).arrayBuffer();
-    const existingQgs = await decompressGzip(ab);
-    qgsStr = patchQGS(existingQgs, groupLabel, layerSpecs, `./${gpkgName}`);
-    outName = _qgzFile.name.replace(/\.(qgz|qgs)$/i, '') + `_${_sCaseId}_${_sSurveyDate}.qgz`;
-  } else {
-    // 無既有 QGZ：建立全新專案
-    const base = generateBaseQGS(_sCaseId);
-    qgsStr = patchQGS(base, groupLabel, layerSpecs, `./${gpkgName}`);
-    outName = `${_sCaseId}_${_sSurveyDate}.qgz`;
-  }
-
-  const qgzBuf = await compressGzip(qgsStr);
-  triggerDownload(new Blob([qgzBuf], {type:'application/x-qgis'}), outName);
 };
 
 // ── 輸出 Google My Maps KML ───────────────────────────────────────────────────
